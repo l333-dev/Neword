@@ -1,0 +1,23 @@
+[package]
+name = "personal-doc-editor"
+version = "0.1.0"
+description = "Personal offline DOCX document editor"
+authors = ["local"]
+edition = "2021"
+
+[lib]
+name = "personal_doc_editor_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+base64 = "0.22"
+quick-xml = { version = "0.38", features = ["serialize"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+thiserror = "2"
+zip = { version = "5", default-features = false, features = ["deflate"] }

@@ -2,6 +2,7 @@ import {
   AlignmentType,
   Document,
   HeadingLevel,
+  ImageRun,
   Packer,
   PageBreak,
   Paragraph,
@@ -41,7 +42,30 @@ function heading(level: 1 | 2 | 3 | 4): (typeof HeadingLevel)[keyof typeof Headi
   return HeadingLevel.HEADING_4;
 }
 
-function blockToDocx(block: ExportBlock): Paragraph | Table {
+function imageType(mimeType: string): "png" | "jpg" | "gif" | null {
+  if (mimeType === "image/png") return "png";
+  if (mimeType === "image/jpeg") return "jpg";
+  if (mimeType === "image/gif") return "gif";
+  return null;
+}
+
+function base64ToBytes(base64: string): Uint8Array {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+  return bytes;
+}
+
+function imageDimensions(block: Extract<ExportBlock, { type: "image" }>): { width: number; height: number } {
+  if (block.widthPx && block.heightPx) return { width: block.widthPx, height: block.heightPx };
+  if (block.widthPx) return { width: block.widthPx, height: Math.max(1, Math.round(block.widthPx * 0.75)) };
+  if (block.heightPx) return { width: Math.max(1, Math.round(block.heightPx * 1.33)), height: block.heightPx };
+  return { width: 320, height: 240 };
+}
+
+function blockToDocx(block: ExportBlock, exportDocument: ExportDocument): Paragraph | Table {
   if (block.type === "heading") {
     return new Paragraph({
       heading: heading(block.level),
@@ -83,8 +107,34 @@ function blockToDocx(block: ExportBlock): Paragraph | Table {
   if (block.type === "page_break") {
     return new Paragraph({ children: [new PageBreak()] });
   }
+  if (block.type === "image") {
+    const asset = exportDocument.assets.find((candidate) => candidate.id === block.assetId);
+    const type = asset ? imageType(asset.mimeType) : null;
+    if (!asset?.dataBase64 || !type) {
+      throw new Error(`Image asset cannot be exported: ${block.assetId}`);
+    }
+    const dimensions = imageDimensions({
+      ...block,
+      widthPx: block.widthPx ?? asset.widthPx,
+      heightPx: block.heightPx ?? asset.heightPx,
+    });
+    return new Paragraph({
+      children: [
+        new ImageRun({
+          type,
+          data: base64ToBytes(asset.dataBase64),
+          transformation: dimensions,
+          altText: {
+            name: block.altText || asset.altText || asset.fileName || asset.name || "image",
+            title: block.altText || asset.altText || asset.fileName || asset.name || "image",
+            description: block.altText || asset.altText || "",
+          },
+        }),
+      ],
+    });
+  }
   return new Paragraph({
-    children: [new TextRun(`[未対応: ${block.type}]`)],
+    children: [new TextRun("[未対応ブロック]")],
   });
 }
 
@@ -103,7 +153,7 @@ export async function exportDocumentToDocxBase64(exportDocument: ExportDocument)
             },
           },
         },
-        children: exportDocument.blocks.map(blockToDocx),
+        children: exportDocument.blocks.map((block) => blockToDocx(block, exportDocument)),
       },
     ],
   });

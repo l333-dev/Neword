@@ -1,4 +1,4 @@
-import type { DocumentProject, PageSettings } from "../../document-model/schema";
+import type { DocumentAsset, DocumentProject, PageSettings } from "../../document-model/schema";
 
 export type ExportInline = {
   text: string;
@@ -14,13 +14,14 @@ export type ExportBlock =
   | { type: "bullet_list"; items: ExportInline[][] }
   | { type: "ordered_list"; items: ExportInline[][] }
   | { type: "table"; rows: ExportInline[][][] }
-  | { type: "image"; assetId: string; altText: string }
+  | { type: "image"; assetId: string; altText: string; widthPx?: number; heightPx?: number }
   | { type: "caption"; kind: "figure" | "table"; content: ExportInline[] }
   | { type: "page_break" };
 
 export type ExportDocument = {
   title: string;
   pageSettings: PageSettings;
+  assets: DocumentAsset[];
   blocks: ExportBlock[];
 };
 
@@ -89,8 +90,15 @@ export function projectToExportDocument(project: DocumentProject): ExportDocumen
       if (node.type === "image") {
         blocks.push({
           type: "image",
-          assetId: typeof node.attrs?.src === "string" ? node.attrs.src : "",
+          assetId:
+            typeof node.attrs?.assetId === "string"
+              ? node.attrs.assetId
+              : typeof node.attrs?.src === "string"
+                ? node.attrs.src
+                : "",
           altText: typeof node.attrs?.alt === "string" ? node.attrs.alt : "",
+          widthPx: numericAttr(node.attrs?.width),
+          heightPx: numericAttr(node.attrs?.height),
         });
         continue;
       }
@@ -100,6 +108,16 @@ export function projectToExportDocument(project: DocumentProject): ExportDocumen
   return {
     title: project.metadata.title,
     pageSettings: project.pageSettings,
+    assets: project.assets,
     blocks,
   };
+}
+
+function numericAttr(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value) && value > 0) return value;
+  if (typeof value === "string") {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed) && parsed > 0) return parsed;
+  }
+  return undefined;
 }

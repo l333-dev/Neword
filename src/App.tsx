@@ -2,13 +2,14 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { EditorContent, useEditor } from "@tiptap/react";
 import type { Content } from "@tiptap/core";
 
-import { createNewProject, type DocumentProject, type PageSettings } from "./document-model/schema";
+import { createNewProject, type DocumentAsset, type DocumentProject, type PageSettings } from "./document-model/schema";
 import { editorExtensions } from "./features/editor/editorConfig";
 import { countCharacters, createOutline } from "./features/editor/outline";
-import { convertDocxToPreview, type ImportPreview } from "./features/import-docx/importDocx";
+import { convertDocxBase64ToImportResult, type ImportPreview } from "./features/import-docx/importDocx";
 import { exportDocumentToDocxBase64 } from "./features/export-docx/docxWriter";
 import { projectToExportDocument } from "./features/export-docx/exportDocument";
 import {
+  openDocxWithDialog,
   openProjectWithDialog,
   saveProjectToPath,
   saveProjectWithDialog,
@@ -29,7 +30,6 @@ export default function App() {
   const [onlyUncertain, setOnlyUncertain] = useState(false);
   const [searchTerm, setSearchTerm] = useState("");
   const [replaceTerm, setReplaceTerm] = useState("");
-  const fileInputRef = useRef<HTMLInputElement>(null);
   const imageInputRef = useRef<HTMLInputElement>(null);
 
   const editor = useEditor({
@@ -114,14 +114,21 @@ export default function App() {
 
   const applyPreview = useCallback(() => {
     if (!preview || !editor) return;
-    editor.commands.setContent(preview.sanitizedHtml);
+    if (preview.warnings.some((warning) => warning.severity === "error")) return;
+    editor.commands.setContent(preview.document.sanitizedHtml);
     setProject((current) =>
       markProjectUpdated({
         ...current,
-        metadata: { ...current.metadata, title: preview.fileName.replace(/\.docx$/i, "") },
+        metadata: {
+          ...current.metadata,
+          title: preview.sourceInfo.name.replace(/\.docx$/i, ""),
+          sourceFileName: preview.sourceInfo.name,
+          importedAt: preview.sourceInfo.inspectedAt,
+        },
         editorContent: editor.getJSON(),
+        assets: mergeAssets(current.assets, preview.assets),
         warnings: preview.warnings,
-        classifications: preview.blocks.map((block) => block.classification),
+        classifications: preview.document.blocks.map((block) => block.classification),
       }),
     );
     setPreview(null);
@@ -132,8 +139,12 @@ export default function App() {
     const exportDocument = projectToExportDocument(project);
     const warnings = project.warnings.filter((warning) => warning.severity !== "info");
     if (warnings.length > 0 && !confirm(`${warnings.length}件の警告があります。続行しますか？`)) return;
-    const base64 = await exportDocumentToDocxBase64(exportDocument);
-    await writeBinaryFileWithDialog(`${project.metadata.title || "document"}.docx`, base64);
+    try {
+      const base64 = await exportDocumentToDocxBase64(exportDocument);
+      await writeBinaryFileWithDialog(`${project.metadata.title || "document"}.docx`, base64);
+    } catch (error) {
+      alert(error instanceof Error ? error.message : "DOCX書き出しに失敗しました。");
+    }
   }, [project]);
 
   useEffect(() => {
@@ -179,9 +190,19 @@ export default function App() {
     if (html !== replaced) editor.commands.setContent(replaced);
   }
 
-  async function onDocxSelected(file: File | undefined) {
-    if (!file) return;
-    const converted = await convertDocxToPreview(file);
+  async function openDocxImport() {
+    const opened = await openDocxWithDialog();
+    if (!opened) return;
+    const converted = await convertDocxBase64ToImportResult(
+      opened.base64,
+      {
+        name: opened.name,
+        sizeBytes: opened.inspection.entries.reduce((sum, entry) => sum + entry.compressed_size, 0),
+        path: opened.path,
+        inspectedAt: new Date().toISOString(),
+      },
+      opened.inspection,
+    );
     setPreview(converted);
   }
 
@@ -206,11 +227,12 @@ export default function App() {
   }
 
   const previewBlocks =
-    preview?.blocks.filter((block) => {
+    preview?.document.blocks.filter((block) => {
       if (onlyWarnings && block.warnings.length === 0) return false;
       if (onlyUncertain && block.classification.certainty !== "uncertain") return false;
       return true;
     }) ?? [];
+  const hasImportErrors = preview?.warnings.some((warning) => warning.severity === "error") ?? false;
 
   return (
     <main className={darkMode ? "app dark" : "app"}>
@@ -243,7 +265,7 @@ export default function App() {
         <button type="button" onClick={() => void saveProjectAs()}>
           別名保存
         </button>
-        <button type="button" onClick={() => fileInputRef.current?.click()}>
+        <button type="button" onClick={() => void openDocxImport()}>
           DOCX読込
         </button>
         <button type="button" onClick={() => void exportDocx()}>
@@ -253,13 +275,6 @@ export default function App() {
           <input type="checkbox" checked={darkMode} onChange={(event) => setDarkMode(event.target.checked)} />
           ダーク
         </label>
-        <input
-          ref={fileInputRef}
-          type="file"
-          accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-          hidden
-          onChange={(event) => void onDocxSelected(event.target.files?.[0])}
-        />
         <input ref={imageInputRef} type="file" accept="image/*" hidden onChange={(event) => void onImageSelected(event.target.files?.[0])} />
       </header>
 
@@ -412,7 +427,55 @@ export default function App() {
       {preview ? (
         <section className="modal" role="dialog" aria-modal="true" aria-label="変換確認">
           <div className="modal-panel">
-            <h2>変換確認: {preview.fileName}</h2>
+            <h2>変換確認: {preview.sourceInfo.name}</h2>
+            <dl className="preview-summary">
+              <div>
+                <dt>ファイルサイズ</dt>
+                <dd>{preview.sourceInfo.sizeBytes.toLocaleString("ja-JP")} bytes</dd>
+              </div>
+              <div>
+                <dt>見出し</dt>
+                <dd>{preview.document.stats.headingCount}</dd>
+              </div>
+              <div>
+                <dt>段落</dt>
+                <dd>{preview.document.stats.paragraphCount}</dd>
+              </div>
+              <div>
+                <dt>表</dt>
+                <dd>{preview.document.stats.tableCount}</dd>
+              </div>
+              <div>
+                <dt>画像</dt>
+                <dd>{preview.document.stats.imageCount}</dd>
+              </div>
+              <div>
+                <dt>保持画像</dt>
+                <dd>{preview.document.stats.retainedImageCount}</dd>
+              </div>
+              <div>
+                <dt>警告画像</dt>
+                <dd>{preview.document.stats.warningImageCount}</dd>
+              </div>
+              <div>
+                <dt>未対応形式</dt>
+                <dd>
+                  {preview.document.stats.unsupportedImageFormats.length > 0
+                    ? preview.document.stats.unsupportedImageFormats.join(", ")
+                    : "なし"}
+                </dd>
+              </div>
+            </dl>
+            {preview.warnings.length > 0 ? (
+              <div className="warning-list" aria-label="ImportWarning一覧">
+                {preview.warnings.map((warning, index) => (
+                  <p key={`${warning.code}-${warning.location ?? index}`} className={`warning warning-${warning.severity}`}>
+                    [{warning.severity}] {warning.code}: {warning.message}
+                    {warning.location ? ` (${warning.location})` : ""}
+                  </p>
+                ))}
+              </div>
+            ) : null}
             <div className="modal-actions">
               <label>
                 <input type="checkbox" checked={onlyUncertain} onChange={(event) => setOnlyUncertain(event.target.checked)} />
@@ -422,8 +485,8 @@ export default function App() {
                 <input type="checkbox" checked={onlyWarnings} onChange={(event) => setOnlyWarnings(event.target.checked)} />
                 警告のみ
               </label>
-              <button type="button" onClick={applyPreview}>
-                変換適用
+              <button type="button" onClick={applyPreview} disabled={hasImportErrors}>
+                読み込む
               </button>
               <button type="button" onClick={() => setPreview(null)}>
                 キャンセル
@@ -441,7 +504,9 @@ export default function App() {
                         current
                           ? {
                               ...current,
-                              blocks: current.blocks.map((item) =>
+                                  document: {
+                                    ...current.document,
+                                    blocks: current.document.blocks.map((item) =>
                                 item.id === block.id
                                   ? {
                                       ...item,
@@ -454,6 +519,7 @@ export default function App() {
                                     }
                                   : item,
                               ),
+                                  },
                             }
                           : current,
                       );
@@ -492,7 +558,9 @@ export default function App() {
                         current
                           ? {
                               ...current,
-                              blocks: current.blocks.map((item) =>
+                              document: {
+                                ...current.document,
+                                blocks: current.document.blocks.map((item) =>
                                 item.id === block.id
                                   ? {
                                       ...item,
@@ -503,6 +571,7 @@ export default function App() {
                                     }
                                   : item,
                               ),
+                              },
                             }
                           : current,
                       );
@@ -512,7 +581,15 @@ export default function App() {
                     type="button"
                     onClick={() =>
                       setPreview((current) =>
-                        current ? { ...current, blocks: current.blocks.filter((item) => item.id !== block.id) } : current,
+                        current
+                          ? {
+                              ...current,
+                              document: {
+                                ...current.document,
+                                blocks: current.document.blocks.filter((item) => item.id !== block.id),
+                              },
+                            }
+                          : current,
                       )
                     }
                   >
@@ -521,8 +598,8 @@ export default function App() {
                   <p>{block.classification.reason}</p>
                   <p>{block.classification.certainty}</p>
                   {block.warnings.map((warning) => (
-                    <p key={warning.id} className="warning">
-                      {warning.message}
+                    <p key={`${warning.code}-${warning.location ?? warning.message}`} className={`warning warning-${warning.severity}`}>
+                      {warning.code}: {warning.message}
                     </p>
                   ))}
                 </article>
@@ -540,4 +617,12 @@ function statusLabel(status: SaveStatus): string {
   if (status === "saving") return "保存中";
   if (status === "error") return "保存エラー";
   return "未保存";
+}
+
+function mergeAssets(current: DocumentAsset[], next: DocumentAsset[]): DocumentAsset[] {
+  const assets = new Map(current.map((asset) => [asset.id, asset]));
+  for (const asset of next) {
+    assets.set(asset.id, asset);
+  }
+  return [...assets.values()];
 }

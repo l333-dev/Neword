@@ -22,9 +22,11 @@ export const BlockTypeSchema = z.enum([
 ]);
 
 export const ImportWarningSchema = z.object({
-  id: z.string(),
+  code: z.string(),
   severity: z.enum(["info", "warning", "error"]),
   message: z.string(),
+  location: z.string().optional(),
+  id: z.string().optional(),
   source: z.string().optional(),
 });
 
@@ -56,16 +58,58 @@ export const PageSettingsSchema = z.object({
   pageNumbers: z.boolean(),
 });
 
-export const AssetSchema = z.object({
-  id: z.string(),
-  kind: z.enum(["image", "original_docx"]),
-  name: z.string(),
-  mimeType: z.string(),
-  dataBase64: z.string().optional(),
-  path: z.string().optional(),
-  altText: z.string().optional(),
-  sizeBytes: z.number().int().nonnegative().optional(),
-});
+export const SupportedImageMimeTypeSchema = z.enum(["image/png", "image/jpeg", "image/gif"]);
+
+const Base64Schema = z.string().regex(/^[A-Za-z0-9+/]*={0,2}$/);
+
+function base64ByteLength(value: string): number {
+  const padding = value.endsWith("==") ? 2 : value.endsWith("=") ? 1 : 0;
+  return Math.floor((value.length * 3) / 4) - padding;
+}
+
+export const AssetSchema = z
+  .object({
+    id: z.string().min(1),
+    kind: z.enum(["image", "original_docx"]),
+    name: z.string().optional(),
+    fileName: z.string().optional(),
+    mimeType: z.string(),
+    dataBase64: Base64Schema.optional(),
+    path: z.string().optional(),
+    altText: z.string().optional(),
+    sizeBytes: z.number().int().nonnegative().optional(),
+    byteSize: z.number().int().nonnegative().optional(),
+    widthPx: z.number().int().positive().optional(),
+    heightPx: z.number().int().positive().optional(),
+    sourcePart: z.string().optional(),
+    relationshipId: z.string().optional(),
+    checksum: z.string().optional(),
+  })
+  .superRefine((asset, context) => {
+    if (asset.kind !== "image") return;
+    if (!SupportedImageMimeTypeSchema.safeParse(asset.mimeType).success) {
+      context.addIssue({
+        code: "custom",
+        message: "unsupported image MIME type",
+        path: ["mimeType"],
+      });
+    }
+    if (!asset.fileName && !asset.name) {
+      context.addIssue({ code: "custom", message: "image asset requires a file name", path: ["fileName"] });
+    }
+    if (!asset.dataBase64) {
+      context.addIssue({ code: "custom", message: "image asset requires base64 data", path: ["dataBase64"] });
+      return;
+    }
+    const declaredSize = asset.byteSize ?? asset.sizeBytes;
+    if (declaredSize !== undefined && base64ByteLength(asset.dataBase64) !== declaredSize) {
+      context.addIssue({
+        code: "custom",
+        message: "image asset byte size does not match base64 data",
+        path: ["byteSize"],
+      });
+    }
+  });
 
 export const MetadataSchema = z.object({
   title: z.string(),
@@ -93,6 +137,7 @@ export type ImportWarning = z.infer<typeof ImportWarningSchema>;
 export type ClassificationResult = z.infer<typeof ClassificationResultSchema>;
 export type BlockType = z.infer<typeof BlockTypeSchema>;
 export type PageSettings = z.infer<typeof PageSettingsSchema>;
+export type DocumentAsset = z.infer<typeof AssetSchema>;
 export type DocumentProject = z.infer<typeof DocumentProjectSchema>;
 
 export const defaultPageSettings: PageSettings = {
@@ -149,5 +194,33 @@ export function createNewProject(now = new Date()): DocumentProject {
 }
 
 export function parseDocumentProject(value: unknown): DocumentProject {
-  return DocumentProjectSchema.parse(value);
+  const project = DocumentProjectSchema.parse(value);
+  validateImageAssetReferences(project);
+  return project;
+}
+
+function validateImageAssetReferences(project: DocumentProject): void {
+  const assetIds = new Set(project.assets.map((asset) => asset.id));
+  const missing = collectMissingImageAssetIds(project.editorContent, assetIds);
+  if (missing.length > 0) {
+    throw new Error(`DocumentProject references missing image assets: ${missing.join(", ")}`);
+  }
+}
+
+function collectMissingImageAssetIds(value: unknown, assetIds: Set<string>): string[] {
+  if (typeof value !== "object" || value === null) return [];
+  const node = value as { type?: unknown; attrs?: unknown; content?: unknown };
+  const missing: string[] = [];
+  if (node.type === "image" && typeof node.attrs === "object" && node.attrs !== null) {
+    const attrs = node.attrs as { assetId?: unknown };
+    if (typeof attrs.assetId === "string" && attrs.assetId.length > 0 && !assetIds.has(attrs.assetId)) {
+      missing.push(attrs.assetId);
+    }
+  }
+  if (Array.isArray(node.content)) {
+    for (const child of node.content) {
+      missing.push(...collectMissingImageAssetIds(child, assetIds));
+    }
+  }
+  return [...new Set(missing)];
 }

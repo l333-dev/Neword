@@ -214,6 +214,35 @@ button {
   margin-bottom: 12px;
 }
 
+.preview-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 8px;
+  margin: 0 0 12px;
+}
+
+.preview-summary div {
+  padding: 8px;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+}
+
+.preview-summary dt {
+  color: #4b5563;
+  font-size: 12px;
+}
+
+.preview-summary dd {
+  margin: 2px 0 0;
+  font-weight: 700;
+}
+
+.warning-list {
+  display: grid;
+  gap: 4px;
+  margin-bottom: 12px;
+}
+
 .preview-list {
   display: grid;
   gap: 10px;
@@ -234,5 +263,17 @@ button {
 }
 
 .warning {
+  color: #991b1b;
+}
+
+.warning-info {
+  color: #1d4ed8;
+}
+
+.warning-warning {
+  color: #92400e;
+}
+
+.warning-error {
   color: #991b1b;
 }

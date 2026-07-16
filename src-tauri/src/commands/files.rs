@@ -28,6 +28,12 @@ pub fn read_text_file(path: String) -> Result<String, String> {
 }
 
 #[tauri::command]
+pub fn read_binary_file_base64(path: String) -> Result<String, String> {
+    let bytes = fs::read(path).map_err(|error| error.to_string())?;
+    Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
+}
+
+#[tauri::command]
 pub fn write_text_file_atomic(path: String, contents: String) -> Result<(), String> {
     write_atomic(Path::new(&path), contents.as_bytes())
 }

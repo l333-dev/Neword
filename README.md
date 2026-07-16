@@ -26,7 +26,9 @@ cd src-tauri && cargo fmt --check && cargo check && cargo test
 - JSON形式のプロジェクト保存/読み込み
 - 保存済み/未保存/保存中/保存エラー表示
 - 保存済みプロジェクトへの自動保存
-- Mammoth.jsベースのDOCX読み込み確認フロー
+- Rust側のZIP安全検査を経由したMammoth.jsベースのDOCX読み込み確認フロー
+- 未対応要素、マクロ、外部リンク画像、構造不備のImportWarning表示
+- DOCX埋め込み画像の内部アセット保持とDOCX再書き出し
 - `ExportDocument` 中間形式を経由したDOCX書き出し
 
 ## 制約

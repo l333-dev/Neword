@@ -34,6 +34,8 @@ pub struct DocxInspection {
     has_macros: bool,
     media_entries: Vec<String>,
     image_relationships: Vec<DocxImageRelationship>,
+    sections: Vec<DocxSection>,
+    paragraphs: Vec<DocxParagraphFormatting>,
     entries: Vec<DocxEntryInfo>,
     warnings: Vec<String>,
 }
@@ -52,6 +54,91 @@ pub struct DocxImageRelationship {
     checksum: Option<String>,
     warning_code: Option<String>,
     warning_message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DocxPageMargins {
+    top_twips: Option<i32>,
+    right_twips: Option<i32>,
+    bottom_twips: Option<i32>,
+    left_twips: Option<i32>,
+    header_twips: Option<i32>,
+    footer_twips: Option<i32>,
+    gutter_twips: Option<i32>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DocxPageSettings {
+    width_twips: Option<i32>,
+    height_twips: Option<i32>,
+    orientation: Option<String>,
+    margins: Option<DocxPageMargins>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DocxSection {
+    index: usize,
+    paragraph_index: Option<usize>,
+    page_settings: Option<DocxPageSettings>,
+    break_type: Option<String>,
+    has_columns: bool,
+    has_page_borders: bool,
+    has_title_page: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DocxParagraphFormatting {
+    index: usize,
+    alignment: Option<String>,
+    indent_left_twips: Option<i32>,
+    indent_right_twips: Option<i32>,
+    first_line_twips: Option<i32>,
+    hanging_twips: Option<i32>,
+    spacing_before_twips: Option<i32>,
+    spacing_after_twips: Option<i32>,
+    line_twips: Option<i32>,
+    line_rule: Option<String>,
+    page_break_before: bool,
+    keep_next: bool,
+    keep_lines: bool,
+    widow_control: Option<bool>,
+    has_page_break: bool,
+}
+
+impl DocxParagraphFormatting {
+    fn new(index: usize) -> Self {
+        Self {
+            index,
+            alignment: None,
+            indent_left_twips: None,
+            indent_right_twips: None,
+            first_line_twips: None,
+            hanging_twips: None,
+            spacing_before_twips: None,
+            spacing_after_twips: None,
+            line_twips: None,
+            line_rule: None,
+            page_break_before: false,
+            keep_next: false,
+            keep_lines: false,
+            widow_control: None,
+            has_page_break: false,
+        }
+    }
+}
+
+impl DocxSection {
+    fn new(index: usize, paragraph_index: Option<usize>) -> Self {
+        Self {
+            index,
+            paragraph_index,
+            page_settings: None,
+            break_type: None,
+            has_columns: false,
+            has_page_borders: false,
+            has_title_page: false,
+        }
+    }
 }
 
 fn validate_zip_path(name: &str) -> Result<(), String> {
@@ -200,6 +287,324 @@ fn parse_image_relationships(
     Ok(relationships)
 }
 
+fn local_name(name: &[u8]) -> &[u8] {
+    name.rsplit(|byte| *byte == b':').next().unwrap_or(name)
+}
+
+fn attr_value(
+    reader: &Reader<&[u8]>,
+    event: &quick_xml::events::BytesStart<'_>,
+    wanted: &[u8],
+) -> Result<Option<String>, String> {
+    for attribute in event.attributes() {
+        let attribute = attribute.map_err(|error| error.to_string())?;
+        if local_name(attribute.key.as_ref()) == wanted {
+            return Ok(Some(
+                attribute
+                    .decode_and_unescape_value(reader.decoder())
+                    .map_err(|error| error.to_string())?
+                    .into_owned(),
+            ));
+        }
+    }
+    Ok(None)
+}
+
+fn attr_i32(
+    reader: &Reader<&[u8]>,
+    event: &quick_xml::events::BytesStart<'_>,
+    wanted: &[u8],
+) -> Result<Option<i32>, String> {
+    let Some(value) = attr_value(reader, event, wanted)? else {
+        return Ok(None);
+    };
+    value
+        .parse::<i32>()
+        .map(Some)
+        .map_err(|_| format!("invalid numeric OOXML attribute: {value}"))
+}
+
+fn attr_bool(
+    reader: &Reader<&[u8]>,
+    event: &quick_xml::events::BytesStart<'_>,
+) -> Result<bool, String> {
+    Ok(match attr_value(reader, event, b"val")?.as_deref() {
+        Some("0") | Some("false") | Some("off") => false,
+        _ => true,
+    })
+}
+
+fn parse_page_settings(
+    reader: &Reader<&[u8]>,
+    event: &quick_xml::events::BytesStart<'_>,
+    section: &mut DocxSection,
+) -> Result<(), String> {
+    let mut page_settings = section.page_settings.clone().unwrap_or(DocxPageSettings {
+        width_twips: None,
+        height_twips: None,
+        orientation: None,
+        margins: None,
+    });
+    page_settings.width_twips = attr_i32(reader, event, b"w")?;
+    page_settings.height_twips = attr_i32(reader, event, b"h")?;
+    page_settings.orientation = attr_value(reader, event, b"orient")?;
+    section.page_settings = Some(page_settings);
+    Ok(())
+}
+
+fn parse_page_margins(
+    reader: &Reader<&[u8]>,
+    event: &quick_xml::events::BytesStart<'_>,
+    section: &mut DocxSection,
+) -> Result<(), String> {
+    let mut page_settings = section.page_settings.clone().unwrap_or(DocxPageSettings {
+        width_twips: None,
+        height_twips: None,
+        orientation: None,
+        margins: None,
+    });
+    page_settings.margins = Some(DocxPageMargins {
+        top_twips: attr_i32(reader, event, b"top")?,
+        right_twips: attr_i32(reader, event, b"right")?,
+        bottom_twips: attr_i32(reader, event, b"bottom")?,
+        left_twips: attr_i32(reader, event, b"left")?,
+        header_twips: attr_i32(reader, event, b"header")?,
+        footer_twips: attr_i32(reader, event, b"footer")?,
+        gutter_twips: attr_i32(reader, event, b"gutter")?,
+    });
+    section.page_settings = Some(page_settings);
+    Ok(())
+}
+
+fn inspect_document_xml(
+    xml: &[u8],
+) -> Result<(Vec<DocxSection>, Vec<DocxParagraphFormatting>), String> {
+    let mut reader = Reader::from_reader(xml);
+    reader.config_mut().trim_text(false);
+    let mut buffer = Vec::new();
+    let mut paragraphs = Vec::new();
+    let mut sections = Vec::new();
+    let mut current_paragraph: Option<DocxParagraphFormatting> = None;
+    let mut current_section: Option<DocxSection> = None;
+    let mut in_paragraph_properties = false;
+    let mut in_section_properties = false;
+    let mut paragraph_index = 0_usize;
+    let mut section_index = 0_usize;
+
+    loop {
+        match reader.read_event_into(&mut buffer) {
+            Ok(Event::Start(event)) => {
+                let raw_name = event.name();
+                let name = local_name(raw_name.as_ref());
+                match name {
+                    b"p" => {
+                        current_paragraph = Some(DocxParagraphFormatting::new(paragraph_index));
+                        paragraph_index += 1;
+                    }
+                    b"pPr" => in_paragraph_properties = true,
+                    b"sectPr" => {
+                        in_section_properties = true;
+                        current_section = Some(DocxSection::new(
+                            section_index,
+                            current_paragraph.as_ref().map(|paragraph| paragraph.index),
+                        ));
+                        section_index += 1;
+                    }
+                    b"pgSz" if in_section_properties => {
+                        if let Some(section) = current_section.as_mut() {
+                            parse_page_settings(&reader, &event, section)?;
+                        }
+                    }
+                    b"pgMar" if in_section_properties => {
+                        if let Some(section) = current_section.as_mut() {
+                            parse_page_margins(&reader, &event, section)?;
+                        }
+                    }
+                    b"type" if in_section_properties => {
+                        if let Some(section) = current_section.as_mut() {
+                            section.break_type = attr_value(&reader, &event, b"val")?;
+                        }
+                    }
+                    b"cols" if in_section_properties => {
+                        if let Some(section) = current_section.as_mut() {
+                            section.has_columns = true;
+                        }
+                    }
+                    b"pgBorders" if in_section_properties => {
+                        if let Some(section) = current_section.as_mut() {
+                            section.has_page_borders = true;
+                        }
+                    }
+                    b"titlePg" if in_section_properties => {
+                        if let Some(section) = current_section.as_mut() {
+                            section.has_title_page = true;
+                        }
+                    }
+                    b"jc" if in_paragraph_properties => {
+                        if let Some(paragraph) = current_paragraph.as_mut() {
+                            paragraph.alignment = attr_value(&reader, &event, b"val")?;
+                        }
+                    }
+                    b"ind" if in_paragraph_properties => {
+                        if let Some(paragraph) = current_paragraph.as_mut() {
+                            paragraph.indent_left_twips = attr_i32(&reader, &event, b"left")?;
+                            paragraph.indent_right_twips = attr_i32(&reader, &event, b"right")?;
+                            paragraph.first_line_twips = attr_i32(&reader, &event, b"firstLine")?;
+                            paragraph.hanging_twips = attr_i32(&reader, &event, b"hanging")?;
+                        }
+                    }
+                    b"spacing" if in_paragraph_properties => {
+                        if let Some(paragraph) = current_paragraph.as_mut() {
+                            paragraph.spacing_before_twips = attr_i32(&reader, &event, b"before")?;
+                            paragraph.spacing_after_twips = attr_i32(&reader, &event, b"after")?;
+                            paragraph.line_twips = attr_i32(&reader, &event, b"line")?;
+                            paragraph.line_rule = attr_value(&reader, &event, b"lineRule")?;
+                        }
+                    }
+                    b"pageBreakBefore" if in_paragraph_properties => {
+                        if let Some(paragraph) = current_paragraph.as_mut() {
+                            paragraph.page_break_before = attr_bool(&reader, &event)?;
+                        }
+                    }
+                    b"keepNext" if in_paragraph_properties => {
+                        if let Some(paragraph) = current_paragraph.as_mut() {
+                            paragraph.keep_next = attr_bool(&reader, &event)?;
+                        }
+                    }
+                    b"keepLines" if in_paragraph_properties => {
+                        if let Some(paragraph) = current_paragraph.as_mut() {
+                            paragraph.keep_lines = attr_bool(&reader, &event)?;
+                        }
+                    }
+                    b"widowControl" if in_paragraph_properties => {
+                        if let Some(paragraph) = current_paragraph.as_mut() {
+                            paragraph.widow_control = Some(attr_bool(&reader, &event)?);
+                        }
+                    }
+                    b"br" => {
+                        if attr_value(&reader, &event, b"type")?.as_deref() == Some("page") {
+                            if let Some(paragraph) = current_paragraph.as_mut() {
+                                paragraph.has_page_break = true;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Ok(Event::Empty(event)) => {
+                let raw_name = event.name();
+                let name = local_name(raw_name.as_ref());
+                match name {
+                    b"pgSz" if in_section_properties => {
+                        if let Some(section) = current_section.as_mut() {
+                            parse_page_settings(&reader, &event, section)?;
+                        }
+                    }
+                    b"pgMar" if in_section_properties => {
+                        if let Some(section) = current_section.as_mut() {
+                            parse_page_margins(&reader, &event, section)?;
+                        }
+                    }
+                    b"type" if in_section_properties => {
+                        if let Some(section) = current_section.as_mut() {
+                            section.break_type = attr_value(&reader, &event, b"val")?;
+                        }
+                    }
+                    b"cols" if in_section_properties => {
+                        if let Some(section) = current_section.as_mut() {
+                            section.has_columns = true;
+                        }
+                    }
+                    b"pgBorders" if in_section_properties => {
+                        if let Some(section) = current_section.as_mut() {
+                            section.has_page_borders = true;
+                        }
+                    }
+                    b"titlePg" if in_section_properties => {
+                        if let Some(section) = current_section.as_mut() {
+                            section.has_title_page = true;
+                        }
+                    }
+                    b"jc" if in_paragraph_properties => {
+                        if let Some(paragraph) = current_paragraph.as_mut() {
+                            paragraph.alignment = attr_value(&reader, &event, b"val")?;
+                        }
+                    }
+                    b"ind" if in_paragraph_properties => {
+                        if let Some(paragraph) = current_paragraph.as_mut() {
+                            paragraph.indent_left_twips = attr_i32(&reader, &event, b"left")?;
+                            paragraph.indent_right_twips = attr_i32(&reader, &event, b"right")?;
+                            paragraph.first_line_twips = attr_i32(&reader, &event, b"firstLine")?;
+                            paragraph.hanging_twips = attr_i32(&reader, &event, b"hanging")?;
+                        }
+                    }
+                    b"spacing" if in_paragraph_properties => {
+                        if let Some(paragraph) = current_paragraph.as_mut() {
+                            paragraph.spacing_before_twips = attr_i32(&reader, &event, b"before")?;
+                            paragraph.spacing_after_twips = attr_i32(&reader, &event, b"after")?;
+                            paragraph.line_twips = attr_i32(&reader, &event, b"line")?;
+                            paragraph.line_rule = attr_value(&reader, &event, b"lineRule")?;
+                        }
+                    }
+                    b"pageBreakBefore" if in_paragraph_properties => {
+                        if let Some(paragraph) = current_paragraph.as_mut() {
+                            paragraph.page_break_before = attr_bool(&reader, &event)?;
+                        }
+                    }
+                    b"keepNext" if in_paragraph_properties => {
+                        if let Some(paragraph) = current_paragraph.as_mut() {
+                            paragraph.keep_next = attr_bool(&reader, &event)?;
+                        }
+                    }
+                    b"keepLines" if in_paragraph_properties => {
+                        if let Some(paragraph) = current_paragraph.as_mut() {
+                            paragraph.keep_lines = attr_bool(&reader, &event)?;
+                        }
+                    }
+                    b"widowControl" if in_paragraph_properties => {
+                        if let Some(paragraph) = current_paragraph.as_mut() {
+                            paragraph.widow_control = Some(attr_bool(&reader, &event)?);
+                        }
+                    }
+                    b"br" => {
+                        if attr_value(&reader, &event, b"type")?.as_deref() == Some("page") {
+                            if let Some(paragraph) = current_paragraph.as_mut() {
+                                paragraph.has_page_break = true;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Ok(Event::End(event)) => {
+                let raw_name = event.name();
+                let name = local_name(raw_name.as_ref());
+                match name {
+                    b"pPr" => in_paragraph_properties = false,
+                    b"sectPr" => {
+                        in_section_properties = false;
+                        if let Some(section) = current_section.take() {
+                            sections.push(section);
+                        }
+                    }
+                    b"p" => {
+                        if let Some(paragraph) = current_paragraph.take() {
+                            paragraphs.push(paragraph);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Ok(Event::Eof) => break,
+            Ok(_) => {}
+            Err(error) => return Err(error.to_string()),
+        }
+        buffer.clear();
+    }
+
+    Ok((sections, paragraphs))
+}
+
 fn read_entry_bytes(
     archive: &mut ZipArchive<File>,
     path: &str,
@@ -301,6 +706,8 @@ pub fn inspect_docx<P: AsRef<Path>>(path: P) -> Result<DocxInspection, String> {
         has_macros: false,
         media_entries: Vec::new(),
         image_relationships: Vec::new(),
+        sections: Vec::new(),
+        paragraphs: Vec::new(),
         entries: Vec::new(),
         warnings: Vec::new(),
     };
@@ -380,6 +787,14 @@ pub fn inspect_docx<P: AsRef<Path>>(path: P) -> Result<DocxInspection, String> {
     if !inspection.has_document_xml {
         return Err("DOCX is missing word/document.xml".to_string());
     }
+    let document_xml = read_entry_bytes(
+        &mut archive,
+        "word/document.xml",
+        MAX_ENTRY_UNCOMPRESSED_SIZE,
+    )?;
+    let (sections, paragraphs) = inspect_document_xml(&document_xml)?;
+    inspection.sections = sections;
+    inspection.paragraphs = paragraphs;
     inspection.image_relationships = extract_docx_images(&mut archive, &rels_parts)?;
 
     Ok(inspection)
@@ -544,6 +959,92 @@ mod tests {
 
         assert!(inspection.has_document_xml);
         Ok(())
+    }
+
+    #[test]
+    fn parses_page_section_and_paragraph_properties() -> Result<(), Box<dyn Error>> {
+        let xml = br#"<?xml version="1.0"?>
+        <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+          <w:body>
+            <w:p>
+              <w:pPr>
+                <w:jc w:val="both"/>
+                <w:ind w:left="720" w:right="360" w:hanging="180"/>
+                <w:spacing w:before="120" w:after="240" w:line="360" w:lineRule="auto"/>
+                <w:pageBreakBefore/>
+                <w:keepNext/>
+                <w:keepLines/>
+                <w:widowControl w:val="0"/>
+              </w:pPr>
+              <w:r><w:t>body</w:t><w:br w:type="page"/></w:r>
+            </w:p>
+            <w:sectPr>
+              <w:pgSz w:w="16838" w:h="11906" w:orient="landscape"/>
+              <w:pgMar w:top="680" w:right="737" w:bottom="794" w:left="850" w:header="454" w:footer="510" w:gutter="113"/>
+              <w:pgBorders/>
+              <w:cols w:num="2"/>
+              <w:titlePg/>
+            </w:sectPr>
+          </w:body>
+        </w:document>"#;
+        let (sections, paragraphs) = super::inspect_document_xml(xml)?;
+
+        assert_eq!(paragraphs.len(), 1);
+        assert_eq!(paragraphs[0].alignment.as_deref(), Some("both"));
+        assert_eq!(paragraphs[0].indent_left_twips, Some(720));
+        assert_eq!(paragraphs[0].hanging_twips, Some(180));
+        assert_eq!(paragraphs[0].spacing_after_twips, Some(240));
+        assert_eq!(paragraphs[0].line_rule.as_deref(), Some("auto"));
+        assert!(paragraphs[0].page_break_before);
+        assert!(paragraphs[0].keep_next);
+        assert!(paragraphs[0].keep_lines);
+        assert_eq!(paragraphs[0].widow_control, Some(false));
+        assert!(paragraphs[0].has_page_break);
+        assert_eq!(sections.len(), 1);
+        assert_eq!(
+            sections[0]
+                .page_settings
+                .as_ref()
+                .and_then(|page| page.width_twips),
+            Some(16838)
+        );
+        assert_eq!(
+            sections[0]
+                .page_settings
+                .as_ref()
+                .and_then(|page| page.orientation.as_deref()),
+            Some("landscape")
+        );
+        assert!(sections[0].has_columns);
+        assert!(sections[0].has_page_borders);
+        assert!(sections[0].has_title_page);
+        Ok(())
+    }
+
+    #[test]
+    fn detects_multiple_sections() -> Result<(), Box<dyn Error>> {
+        let xml = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:pPr><w:sectPr><w:type w:val="continuous"/></w:sectPr></w:pPr></w:p><w:sectPr><w:type w:val="nextPage"/></w:sectPr></w:body></w:document>"#;
+        let (sections, paragraphs) = super::inspect_document_xml(xml)?;
+
+        assert_eq!(paragraphs.len(), 1);
+        assert_eq!(sections.len(), 2);
+        assert_eq!(sections[0].paragraph_index, Some(0));
+        assert_eq!(sections[1].break_type.as_deref(), Some("nextPage"));
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_invalid_ooxml_numbers() {
+        let xml = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:pPr><w:ind w:left="NaN"/></w:pPr></w:p></w:body></w:document>"#;
+
+        assert!(super::inspect_document_xml(xml).is_err());
+    }
+
+    #[test]
+    fn rejects_malformed_document_xml() {
+        let xml = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p></w:body></w:document>"#;
+
+        assert!(super::inspect_document_xml(xml).is_err());
     }
 
     #[test]

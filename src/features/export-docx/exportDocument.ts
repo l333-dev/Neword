@@ -1,4 +1,10 @@
-import type { DocumentAsset, DocumentProject, PageSettings } from "../../document-model/schema";
+import {
+  ParagraphFormattingSchema,
+  type DocumentAsset,
+  type DocumentProject,
+  type PageSettings,
+  type ParagraphFormatting,
+} from "../../document-model/schema";
 
 export type ExportInline = {
   text: string;
@@ -9,8 +15,19 @@ export type ExportInline = {
 };
 
 export type ExportBlock =
-  | { type: "heading"; level: 1 | 2 | 3 | 4; align: "left" | "center" | "right"; content: ExportInline[] }
-  | { type: "paragraph"; align: "left" | "center" | "right"; content: ExportInline[] }
+  | {
+      type: "heading";
+      level: 1 | 2 | 3 | 4;
+      align: "left" | "center" | "right" | "justify";
+      formatting?: ParagraphFormatting;
+      content: ExportInline[];
+    }
+  | {
+      type: "paragraph";
+      align: "left" | "center" | "right" | "justify";
+      formatting?: ParagraphFormatting;
+      content: ExportInline[];
+    }
   | { type: "bullet_list"; items: ExportInline[][] }
   | { type: "ordered_list"; items: ExportInline[][] }
   | { type: "table"; rows: ExportInline[][][] }
@@ -53,8 +70,17 @@ function inlineFromNodes(nodes: TiptapNode[] | undefined): ExportInline[] {
   );
 }
 
-function alignFromAttrs(attrs: Record<string, unknown> | undefined): "left" | "center" | "right" {
-  return attrs?.textAlign === "center" || attrs?.textAlign === "right" ? attrs.textAlign : "left";
+function alignFromAttrs(attrs: Record<string, unknown> | undefined): "left" | "center" | "right" | "justify" {
+  const formatting = paragraphFormattingFromAttrs(attrs);
+  if (attrs?.textAlign === "center" || attrs?.textAlign === "right" || attrs?.textAlign === "justify") {
+    return attrs.textAlign;
+  }
+  return formatting?.alignment ?? "left";
+}
+
+function paragraphFormattingFromAttrs(attrs: Record<string, unknown> | undefined): ParagraphFormatting | undefined {
+  const parsed = ParagraphFormattingSchema.safeParse(attrs?.paragraphFormatting);
+  return parsed.success ? parsed.data : undefined;
 }
 
 export function projectToExportDocument(project: DocumentProject): ExportDocument {
@@ -64,11 +90,22 @@ export function projectToExportDocument(project: DocumentProject): ExportDocumen
       if (node.type === "heading") {
         const rawLevel = node.attrs?.level;
         const level = rawLevel === 2 || rawLevel === 3 || rawLevel === 4 ? rawLevel : 1;
-        blocks.push({ type: "heading", level, align: alignFromAttrs(node.attrs), content: inlineFromNodes(node.content) });
+        blocks.push({
+          type: "heading",
+          level,
+          align: alignFromAttrs(node.attrs),
+          formatting: paragraphFormattingFromAttrs(node.attrs),
+          content: inlineFromNodes(node.content),
+        });
         continue;
       }
       if (node.type === "paragraph") {
-        blocks.push({ type: "paragraph", align: alignFromAttrs(node.attrs), content: inlineFromNodes(node.content) });
+        blocks.push({
+          type: "paragraph",
+          align: alignFromAttrs(node.attrs),
+          formatting: paragraphFormattingFromAttrs(node.attrs),
+          content: inlineFromNodes(node.content),
+        });
         continue;
       }
       if (node.type === "bulletList" || node.type === "orderedList") {

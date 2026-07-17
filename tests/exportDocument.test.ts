@@ -46,4 +46,69 @@ describe("DOCX export", () => {
     expect(mediaEntries).toHaveLength(1);
     expect(mediaEntries[0]).toMatch(/\.png$/);
   });
+
+  it("writes page settings and paragraph formatting to document XML", async () => {
+    const project = createNewProject(new Date("2026-07-15T00:00:00.000Z"));
+    const base64 = await exportDocumentToDocxBase64(
+      projectToExportDocument({
+        ...project,
+        pageSettings: {
+          ...project.pageSettings,
+          size: "A4",
+          widthMm: 297,
+          heightMm: 210,
+          orientation: "landscape",
+          margins: {
+            topMm: 12,
+            rightMm: 13,
+            bottomMm: 14,
+            leftMm: 15,
+            headerMm: 8,
+            footerMm: 9,
+            gutterMm: 2,
+          },
+          marginsMm: { top: 12, right: 13, bottom: 14, left: 15 },
+        },
+        editorContent: {
+          type: "doc",
+          content: [
+            {
+              type: "paragraph",
+              attrs: {
+                textAlign: "justify",
+                paragraphFormatting: {
+                  alignment: "justify",
+                  indentLeftMm: 10,
+                  indentRightMm: 5,
+                  hangingIndentMm: 3,
+                  spaceBeforePt: 6,
+                  spaceAfterPt: 12,
+                  lineSpacing: { type: "multiple", value: 1.5 },
+                  keepWithNext: true,
+                  keepLinesTogether: true,
+                },
+              },
+              content: [{ type: "text", text: "formatted" }],
+            },
+            { type: "pageBreak" },
+          ],
+        },
+      }),
+    );
+    const zip = await JSZip.loadAsync(base64, { base64: true });
+    const documentXml = await zip.file("word/document.xml")?.async("string");
+
+    expect(documentXml).toContain('w:orient="landscape"');
+    expect(documentXml).toContain('w:w="11906"');
+    expect(documentXml).toContain('w:h="16838"');
+    expect(documentXml).toContain('w:top="680"');
+    expect(documentXml).toContain("<w:jc");
+    expect(documentXml).toContain('w:val="both"');
+    expect(documentXml).toContain("<w:ind");
+    expect(documentXml).toContain("<w:spacing");
+    expect(documentXml).toContain('w:line="360"');
+    expect(documentXml).toContain("<w:keepNext");
+    expect(documentXml).toContain("<w:keepLines");
+    expect(documentXml).toContain('<w:br w:type="page"');
+  });
 });

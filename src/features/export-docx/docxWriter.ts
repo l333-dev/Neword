@@ -3,18 +3,23 @@ import {
   Document,
   HeadingLevel,
   ImageRun,
+  LineRuleType,
   Packer,
   PageBreak,
+  PageOrientation,
   Paragraph,
   Table,
   TableCell,
   TableRow,
   TextRun,
   WidthType,
+  type IParagraphOptions,
 } from "docx";
 
-import { mmToTwips } from "../../converters/units";
+import { millimetersToTwips, pointsToTwips } from "../../converters/units";
 import type { ExportBlock, ExportDocument, ExportInline } from "./exportDocument";
+
+type ExportParagraphBlock = Extract<ExportBlock, { type: "heading" | "paragraph" }>;
 
 function runs(content: ExportInline[]): TextRun[] {
   return content.map(
@@ -29,9 +34,10 @@ function runs(content: ExportInline[]): TextRun[] {
   );
 }
 
-function alignment(value: "left" | "center" | "right"): (typeof AlignmentType)[keyof typeof AlignmentType] {
+function alignment(value: "left" | "center" | "right" | "justify"): (typeof AlignmentType)[keyof typeof AlignmentType] {
   if (value === "center") return AlignmentType.CENTER;
   if (value === "right") return AlignmentType.RIGHT;
+  if (value === "justify") return AlignmentType.JUSTIFIED;
   return AlignmentType.LEFT;
 }
 
@@ -65,17 +71,66 @@ function imageDimensions(block: Extract<ExportBlock, { type: "image" }>): { widt
   return { width: 320, height: 240 };
 }
 
+function paragraphOptions(block: ExportParagraphBlock): IParagraphOptions {
+  const formatting = block.formatting;
+  return {
+    alignment: alignment(block.align),
+    pageBreakBefore: formatting?.pageBreakBefore,
+    keepNext: formatting?.keepWithNext,
+    keepLines: formatting?.keepLinesTogether,
+    indent: formatting
+      ? {
+          left:
+            formatting.indentLeftMm === undefined ? undefined : millimetersToTwips(formatting.indentLeftMm),
+          right:
+            formatting.indentRightMm === undefined ? undefined : millimetersToTwips(formatting.indentRightMm),
+          firstLine:
+            formatting.firstLineIndentMm === undefined
+              ? undefined
+              : millimetersToTwips(formatting.firstLineIndentMm),
+          hanging:
+            formatting.hangingIndentMm === undefined ? undefined : millimetersToTwips(formatting.hangingIndentMm),
+        }
+      : undefined,
+    spacing: formatting
+      ? {
+          before: formatting.spaceBeforePt === undefined ? undefined : pointsToTwips(formatting.spaceBeforePt),
+          after: formatting.spaceAfterPt === undefined ? undefined : pointsToTwips(formatting.spaceAfterPt),
+          line: lineSpacingValue(formatting.lineSpacing),
+          lineRule: lineRule(formatting.lineSpacing),
+        }
+      : undefined,
+  };
+}
+
+function lineSpacingValue(
+  lineSpacing: NonNullable<ExportParagraphBlock["formatting"]>["lineSpacing"],
+): number | undefined {
+  if (!lineSpacing) return undefined;
+  if (lineSpacing.type === "single" || lineSpacing.type === "multiple") return Math.round(lineSpacing.value * 240);
+  return pointsToTwips(lineSpacing.value);
+}
+
+function lineRule(
+  lineSpacing: NonNullable<ExportParagraphBlock["formatting"]>["lineSpacing"],
+): (typeof LineRuleType)[keyof typeof LineRuleType] | undefined {
+  if (!lineSpacing) return undefined;
+  if (lineSpacing.type === "exact") return LineRuleType.EXACT;
+  if (lineSpacing.type === "atLeast") return LineRuleType.AT_LEAST;
+  return LineRuleType.AUTO;
+}
+
 function blockToDocx(block: ExportBlock, exportDocument: ExportDocument): Paragraph | Table {
   if (block.type === "heading") {
     return new Paragraph({
+      ...paragraphOptions(block),
       heading: heading(block.level),
-      alignment: alignment(block.align),
       children: runs(block.content),
     });
   }
   if (block.type === "paragraph" || block.type === "caption") {
     return new Paragraph({
-      alignment: block.type === "paragraph" ? alignment(block.align) : AlignmentType.CENTER,
+      ...(block.type === "paragraph" ? paragraphOptions(block) : { alignment: AlignmentType.CENTER }),
       children: runs(block.content),
     });
   }
@@ -139,17 +194,28 @@ function blockToDocx(block: ExportBlock, exportDocument: ExportDocument): Paragr
 }
 
 export async function exportDocumentToDocxBase64(exportDocument: ExportDocument): Promise<string> {
-  const margins = exportDocument.pageSettings.marginsMm;
+  const margins = exportDocument.pageSettings.margins;
   const document = new Document({
     sections: [
       {
         properties: {
           page: {
+            size: {
+              width: millimetersToTwips(exportDocument.pageSettings.widthMm),
+              height: millimetersToTwips(exportDocument.pageSettings.heightMm),
+              orientation:
+                exportDocument.pageSettings.orientation === "landscape"
+                  ? PageOrientation.LANDSCAPE
+                  : PageOrientation.PORTRAIT,
+            },
             margin: {
-              top: mmToTwips(margins.top),
-              right: mmToTwips(margins.right),
-              bottom: mmToTwips(margins.bottom),
-              left: mmToTwips(margins.left),
+              top: millimetersToTwips(margins.topMm),
+              right: millimetersToTwips(margins.rightMm),
+              bottom: millimetersToTwips(margins.bottomMm),
+              left: millimetersToTwips(margins.leftMm),
+              header: margins.headerMm === undefined ? undefined : millimetersToTwips(margins.headerMm),
+              footer: margins.footerMm === undefined ? undefined : millimetersToTwips(margins.footerMm),
+              gutter: margins.gutterMm === undefined ? undefined : millimetersToTwips(margins.gutterMm),
             },
           },
         },

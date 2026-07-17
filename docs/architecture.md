@@ -18,11 +18,17 @@
 
 本文はTiptap JSONを正規形式として `DocumentProject.editorContent` に保持します。ページ設定、警告、分類結果、アセット、作成/更新/書き出し時刻も同じプロジェクトJSONに保存します。
 
+`DocumentProject.pageSettings` はDOCX由来の用紙幅/高さmm、向き、上下左右余白、ヘッダー/フッター/とじしろ余白を保持します。既存UI互換のため `marginsMm` も当面保持しますが、DOCX入出力では `margins` を正とします。段落と見出しのDOCX由来書式はTiptapノード属性 `paragraphFormatting` に、検証済みの既知キーだけを保存します。
+
 ## DOCX読み込み
 
 TauriのファイルダイアログでDOCXを選択し、Rust側でDOCXをZIPとして検証します。Rust側はpath traversal、過大entry、異常な圧縮率、マクロ、主要OOXML partの有無を検出します。
 
 検査後、ローカルファイルをbase64でブラウザ側へ渡し、Mammoth.jsがDOCXからHTMLを抽出します。HTMLはDOMPurifyで許可タグ・許可属性を明示してサニタイズし、外部リンク画像の `src` は削除します。サニタイズ済みHTMLは一時的な変換入力として扱い、永続形式は `ImportDocument` とTiptap JSONに分離します。
+
+Rust側は `word/document.xml` の `w:sectPr`、`w:pgSz`、`w:pgMar`、`w:pPr`、`w:jc`、`w:ind`、`w:spacing`、`w:pageBreakBefore`、`w:keepNext`、`w:keepLines`、`w:br w:type="page"` を補助情報として抽出します。フロント側は段落順でMammoth HTMLへ制御済み属性を付与し、Tiptapの段落/見出し属性として保持します。
+
+複数セクションは現段階では内部セクション構造へ展開しません。最初のセクションを文書全体のページ設定として使用し、2つ目以降は `section.multiple_sections` として警告します。`w:pgBorders`、`w:cols`、先頭ページだけ異なるヘッダー/フッター設定、未対応section breakは検出と警告に留めます。
 
 未対応のコメント、脚注、文末脚注、グラフ、SmartArt、ヘッダー、フッター、マクロ、外部リンク画像、空本文などは `ImportWarning` として記録します。安全に読み込める場合は警告付きで続行し、重大なエラーは読み込み確認画面で適用を止めます。
 
@@ -37,3 +43,5 @@ Rust側は `word/document.xml`、`word/_rels/document.xml.rels`、`word/media/*`
 ## DOCX書き出し
 
 `DocumentProject -> ExportDocument -> docx.js -> DOCX bytes -> Tauri保存` の順に変換します。`ExportDocument` はReact、Tauri、docx.jsクラスへ依存しません。画像は `assetId` から `DocumentProject.assets` を解決し、docx.jsの `ImageRun` として新しいDOCXへ書き出します。assetを解決できない場合は書き出しエラーにします。
+
+ページ設定はdocx.jsのsection page size/marginsへ反映します。段落/見出しの揃え、インデント、段落前後間隔、行間、段落前改ページ、keepNext、keepLinesは可能な範囲でParagraph optionsへ反映します。`widowControl`、ページ罫線、段組み、複数セクションは現時点では書き出し対象外です。

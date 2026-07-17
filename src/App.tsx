@@ -59,7 +59,7 @@ export default function App() {
     setProject((current) =>
       markProjectUpdated({
         ...current,
-        pageSettings: { ...current.pageSettings, ...patch },
+        pageSettings: normalizePageSettingsPatch(current.pageSettings, patch),
       }),
     );
     setSaveStatus("dirty");
@@ -126,6 +126,7 @@ export default function App() {
           importedAt: preview.sourceInfo.inspectedAt,
         },
         editorContent: editor.getJSON(),
+        pageSettings: preview.pageSettings,
         assets: mergeAssets(current.assets, preview.assets),
         warnings: preview.warnings,
         classifications: preview.document.blocks.map((block) => block.classification),
@@ -319,6 +320,9 @@ export default function App() {
             </button>
             <button type="button" onClick={() => editor?.chain().focus().setTextAlign("right").run()} aria-label="右揃え">
               右
+            </button>
+            <button type="button" onClick={() => editor?.chain().focus().setTextAlign("justify").run()} aria-label="両端揃え">
+              両
             </button>
             <button type="button" onClick={() => editor?.chain().focus().toggleBulletList().run()}>
               箇条
@@ -625,4 +629,32 @@ function mergeAssets(current: DocumentAsset[], next: DocumentAsset[]): DocumentA
     assets.set(asset.id, asset);
   }
   return [...assets.values()];
+}
+
+function normalizePageSettingsPatch(current: PageSettings, patch: Partial<PageSettings>): PageSettings {
+  const next: PageSettings = { ...current, ...patch };
+  if (patch.marginsMm) {
+    next.margins = {
+      ...next.margins,
+      topMm: patch.marginsMm.top,
+      rightMm: patch.marginsMm.right,
+      bottomMm: patch.marginsMm.bottom,
+      leftMm: patch.marginsMm.left,
+    };
+  }
+  if (patch.margins) {
+    next.marginsMm = {
+      top: patch.margins.topMm,
+      right: patch.margins.rightMm,
+      bottom: patch.margins.bottomMm,
+      left: patch.margins.leftMm,
+    };
+  }
+  if (patch.orientation) {
+    const shortSide = Math.min(next.widthMm, next.heightMm);
+    const longSide = Math.max(next.widthMm, next.heightMm);
+    next.widthMm = patch.orientation === "landscape" ? longSide : shortSide;
+    next.heightMm = patch.orientation === "landscape" ? shortSide : longSide;
+  }
+  return next;
 }

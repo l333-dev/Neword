@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const DOCUMENT_FORMAT_VERSION = 1;
+export const DOCUMENT_FORMAT_VERSION = 2;
 
 export const CertaintySchema = z.enum(["certain", "probable", "uncertain"]);
 
@@ -28,6 +28,10 @@ export const ImportWarningSchema = z.object({
   location: z.string().optional(),
   id: z.string().optional(),
   source: z.string().optional(),
+  part: z.string().optional(),
+  paragraphIndex: z.number().int().nonnegative().optional(),
+  originalValue: z.unknown().optional(),
+  fallbackValue: z.unknown().optional(),
 });
 
 export const ClassificationResultSchema = z.object({
@@ -39,24 +43,92 @@ export const ClassificationResultSchema = z.object({
   certainty: CertaintySchema,
 });
 
-export const PageSettingsSchema = z.object({
-  size: z.enum(["A4"]),
-  orientation: z.enum(["portrait", "landscape"]),
-  marginsMm: z.object({
-    top: z.number().positive(),
-    right: z.number().positive(),
-    bottom: z.number().positive(),
-    left: z.number().positive(),
-  }),
-  bodyFontFamily: z.string().min(1),
-  bodyFontSizePt: z.number().positive(),
-  lineHeight: z.number().positive(),
-  paragraphSpacingBeforePt: z.number().min(0),
-  paragraphSpacingAfterPt: z.number().min(0),
-  header: z.string(),
-  footer: z.string(),
-  pageNumbers: z.boolean(),
+const SafeMillimetersSchema = z.number().finite().min(0).max(1000);
+const SafePageDimensionMmSchema = z.number().finite().min(25).max(2000);
+const SafePointsSchema = z.number().finite().min(0).max(1000);
+
+export const PageMarginsSchema = z.object({
+  topMm: SafeMillimetersSchema,
+  rightMm: SafeMillimetersSchema,
+  bottomMm: SafeMillimetersSchema,
+  leftMm: SafeMillimetersSchema,
+  headerMm: SafeMillimetersSchema.optional(),
+  footerMm: SafeMillimetersSchema.optional(),
+  gutterMm: SafeMillimetersSchema.optional(),
 });
+
+export const LegacyMarginsMmSchema = z.object({
+  top: SafeMillimetersSchema,
+  right: SafeMillimetersSchema,
+  bottom: SafeMillimetersSchema,
+  left: SafeMillimetersSchema,
+});
+
+export const PageSettingsSchema = z
+  .object({
+    size: z.enum(["A4", "Letter", "Custom"]),
+    widthMm: SafePageDimensionMmSchema,
+    heightMm: SafePageDimensionMmSchema,
+    orientation: z.enum(["portrait", "landscape"]),
+    margins: PageMarginsSchema,
+    marginsMm: LegacyMarginsMmSchema,
+    bodyFontFamily: z.string().min(1),
+    bodyFontSizePt: z.number().finite().positive(),
+    lineHeight: z.number().finite().positive(),
+    paragraphSpacingBeforePt: SafePointsSchema,
+    paragraphSpacingAfterPt: SafePointsSchema,
+    header: z.string(),
+    footer: z.string(),
+    pageNumbers: z.boolean(),
+  })
+  .superRefine((settings, context) => {
+    const isLandscape = settings.orientation === "landscape";
+    if (isLandscape && settings.widthMm < settings.heightMm) {
+      context.addIssue({
+        code: "custom",
+        message: "landscape page settings require widthMm >= heightMm",
+        path: ["widthMm"],
+      });
+    }
+    if (!isLandscape && settings.widthMm > settings.heightMm) {
+      context.addIssue({
+        code: "custom",
+        message: "portrait page settings require widthMm <= heightMm",
+        path: ["widthMm"],
+      });
+    }
+  });
+
+export const ParagraphAlignmentSchema = z.enum(["left", "center", "right", "justify"]);
+
+export const ParagraphFormattingSchema = z
+  .object({
+    alignment: ParagraphAlignmentSchema.optional(),
+    indentLeftMm: z.number().finite().min(-250).max(250).optional(),
+    indentRightMm: z.number().finite().min(-250).max(250).optional(),
+    firstLineIndentMm: z.number().finite().min(0).max(250).optional(),
+    hangingIndentMm: z.number().finite().min(0).max(250).optional(),
+    spaceBeforePt: SafePointsSchema.optional(),
+    spaceAfterPt: SafePointsSchema.optional(),
+    lineSpacing: z
+      .object({
+        type: z.enum(["single", "multiple", "exact", "atLeast"]),
+        value: z.number().finite().min(0).max(1000),
+      })
+      .optional(),
+    pageBreakBefore: z.boolean().optional(),
+    keepWithNext: z.boolean().optional(),
+    keepLinesTogether: z.boolean().optional(),
+  })
+  .superRefine((formatting, context) => {
+    if (formatting.firstLineIndentMm !== undefined && formatting.hangingIndentMm !== undefined) {
+      context.addIssue({
+        code: "custom",
+        message: "firstLineIndentMm and hangingIndentMm are mutually exclusive",
+        path: ["firstLineIndentMm"],
+      });
+    }
+  });
 
 export const SupportedImageMimeTypeSchema = z.enum(["image/png", "image/jpeg", "image/gif"]);
 
@@ -137,12 +209,21 @@ export type ImportWarning = z.infer<typeof ImportWarningSchema>;
 export type ClassificationResult = z.infer<typeof ClassificationResultSchema>;
 export type BlockType = z.infer<typeof BlockTypeSchema>;
 export type PageSettings = z.infer<typeof PageSettingsSchema>;
+export type ParagraphFormatting = z.infer<typeof ParagraphFormattingSchema>;
 export type DocumentAsset = z.infer<typeof AssetSchema>;
 export type DocumentProject = z.infer<typeof DocumentProjectSchema>;
 
 export const defaultPageSettings: PageSettings = {
   size: "A4",
+  widthMm: 210,
+  heightMm: 297,
   orientation: "portrait",
+  margins: {
+    topMm: 25,
+    rightMm: 25,
+    bottomMm: 25,
+    leftMm: 25,
+  },
   marginsMm: {
     top: 25,
     right: 25,

@@ -27,6 +27,51 @@ export type DocxImageRelationship = {
   warning_message: string | null;
 };
 
+export type DocxPageMargins = {
+  top_twips: number | null;
+  right_twips: number | null;
+  bottom_twips: number | null;
+  left_twips: number | null;
+  header_twips: number | null;
+  footer_twips: number | null;
+  gutter_twips: number | null;
+};
+
+export type DocxPageSettings = {
+  width_twips: number | null;
+  height_twips: number | null;
+  orientation: string | null;
+  margins: DocxPageMargins | null;
+};
+
+export type DocxSection = {
+  index: number;
+  paragraph_index: number | null;
+  page_settings: DocxPageSettings | null;
+  break_type: string | null;
+  has_columns: boolean;
+  has_page_borders: boolean;
+  has_title_page: boolean;
+};
+
+export type DocxParagraphFormatting = {
+  index: number;
+  alignment: string | null;
+  indent_left_twips: number | null;
+  indent_right_twips: number | null;
+  first_line_twips: number | null;
+  hanging_twips: number | null;
+  spacing_before_twips: number | null;
+  spacing_after_twips: number | null;
+  line_twips: number | null;
+  line_rule: string | null;
+  page_break_before: boolean;
+  keep_next: boolean;
+  keep_lines: boolean;
+  widow_control: boolean | null;
+  has_page_break: boolean;
+};
+
 export type DocxInspection = {
   has_document_xml: boolean;
   has_styles_xml: boolean;
@@ -37,6 +82,8 @@ export type DocxInspection = {
   has_macros: boolean;
   media_entries: string[];
   image_relationships: DocxImageRelationship[];
+  sections: DocxSection[];
+  paragraphs: DocxParagraphFormatting[];
   entries: DocxEntryInfo[];
   warnings: string[];
 };

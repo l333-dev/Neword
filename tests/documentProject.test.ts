@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import { createNewProject, DocumentProjectSchema, ParagraphFormattingSchema } from "../src/document-model/schema";
+import {
+  createNewProject,
+  DocumentProjectSchema,
+  ParagraphFormattingSchema,
+} from "../src/document-model/schema";
 import { deserializeProject, serializeProject } from "../src/project/serialization";
 
 describe("DocumentProject", () => {
@@ -20,9 +24,11 @@ describe("DocumentProject", () => {
 
   it("migrates version 1 page settings to the current format", () => {
     const project = createNewProject(new Date("2026-07-15T00:00:00.000Z"));
+    const legacyProject: Partial<typeof project> = { ...project };
+    delete legacyProject.documentDefaults;
     const migrated = deserializeProject(
       JSON.stringify({
-        ...project,
+        ...legacyProject,
         formatVersion: 1,
         pageSettings: {
           size: "A4",
@@ -40,10 +46,12 @@ describe("DocumentProject", () => {
       }),
     );
 
-    expect(migrated.formatVersion).toBe(2);
+    expect(migrated.formatVersion).toBe(3);
     expect(migrated.pageSettings.widthMm).toBe(297);
     expect(migrated.pageSettings.heightMm).toBe(210);
     expect(migrated.pageSettings.margins.leftMm).toBe(13);
+    expect(migrated.documentDefaults.bodyParagraph.spacingAfterPt).toBe(6);
+    expect(migrated.documentDefaults.bodyParagraph.lineHeight).toBe(1.6);
   });
 
   it("rejects invalid page settings and paragraph formatting", () => {

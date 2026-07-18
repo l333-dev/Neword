@@ -1,12 +1,13 @@
-import { parseDocumentProject, type DocumentProject } from "./schema";
+import { defaultDocumentDefaults, parseDocumentProject, type DocumentProject } from "./schema";
 
 export function migrateDocumentProject(value: unknown): DocumentProject {
   if (typeof value === "object" && value !== null) {
     const versioned = value as Record<string, unknown>;
-    if (versioned.formatVersion === 1) {
-      versioned.formatVersion = 2;
+    if (versioned.formatVersion === 1 || versioned.formatVersion === 2) {
+      versioned.formatVersion = 3;
     }
     migratePageSettings(versioned);
+    migrateDocumentDefaults(versioned);
     const candidate = value as {
       warnings?: unknown;
     };
@@ -46,6 +47,35 @@ export function migrateDocumentProject(value: unknown): DocumentProject {
   return parseDocumentProject(value);
 }
 
+function migrateDocumentDefaults(project: Record<string, unknown>): void {
+  if (typeof project.documentDefaults === "object" && project.documentDefaults !== null) return;
+  const pageSettings =
+    typeof project.pageSettings === "object" && project.pageSettings !== null
+      ? (project.pageSettings as Record<string, unknown>)
+      : {};
+  const lineHeight = numberOrDefault(
+    pageSettings.lineHeight,
+    defaultDocumentDefaults.bodyParagraph.lineHeight,
+  );
+  const spacingBeforePt = numberOrDefault(
+    pageSettings.paragraphSpacingBeforePt,
+    defaultDocumentDefaults.bodyParagraph.spacingBeforePt,
+  );
+  const spacingAfterPt = numberOrDefault(
+    pageSettings.paragraphSpacingAfterPt,
+    defaultDocumentDefaults.bodyParagraph.spacingAfterPt,
+  );
+
+  project.documentDefaults = {
+    ...defaultDocumentDefaults,
+    bodyParagraph: {
+      spacingBeforePt,
+      spacingAfterPt,
+      lineHeight,
+    },
+  };
+}
+
 function migratePageSettings(project: Record<string, unknown>): void {
   if (typeof project.pageSettings !== "object" || project.pageSettings === null) return;
   const pageSettings = project.pageSettings as Record<string, unknown>;
@@ -59,17 +89,40 @@ function migratePageSettings(project: Record<string, unknown>): void {
   const left = numberOrDefault(marginsMm.left, 25);
   const orientation = pageSettings.orientation === "landscape" ? "landscape" : "portrait";
 
-  pageSettings.size = pageSettings.size === "Letter" || pageSettings.size === "Custom" ? pageSettings.size : "A4";
+  pageSettings.size =
+    pageSettings.size === "Letter" || pageSettings.size === "Custom" ? pageSettings.size : "A4";
   pageSettings.widthMm =
-    typeof pageSettings.widthMm === "number" ? pageSettings.widthMm : orientation === "landscape" ? 297 : 210;
+    typeof pageSettings.widthMm === "number"
+      ? pageSettings.widthMm
+      : orientation === "landscape"
+        ? 297
+        : 210;
   pageSettings.heightMm =
-    typeof pageSettings.heightMm === "number" ? pageSettings.heightMm : orientation === "landscape" ? 210 : 297;
+    typeof pageSettings.heightMm === "number"
+      ? pageSettings.heightMm
+      : orientation === "landscape"
+        ? 210
+        : 297;
   pageSettings.margins = {
-    ...(typeof pageSettings.margins === "object" && pageSettings.margins !== null ? pageSettings.margins : {}),
-    topMm: numberOrDefault((pageSettings.margins as Record<string, unknown> | undefined)?.topMm, top),
-    rightMm: numberOrDefault((pageSettings.margins as Record<string, unknown> | undefined)?.rightMm, right),
-    bottomMm: numberOrDefault((pageSettings.margins as Record<string, unknown> | undefined)?.bottomMm, bottom),
-    leftMm: numberOrDefault((pageSettings.margins as Record<string, unknown> | undefined)?.leftMm, left),
+    ...(typeof pageSettings.margins === "object" && pageSettings.margins !== null
+      ? pageSettings.margins
+      : {}),
+    topMm: numberOrDefault(
+      (pageSettings.margins as Record<string, unknown> | undefined)?.topMm,
+      top,
+    ),
+    rightMm: numberOrDefault(
+      (pageSettings.margins as Record<string, unknown> | undefined)?.rightMm,
+      right,
+    ),
+    bottomMm: numberOrDefault(
+      (pageSettings.margins as Record<string, unknown> | undefined)?.bottomMm,
+      bottom,
+    ),
+    leftMm: numberOrDefault(
+      (pageSettings.margins as Record<string, unknown> | undefined)?.leftMm,
+      left,
+    ),
   };
 }
 

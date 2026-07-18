@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const DOCUMENT_FORMAT_VERSION = 2;
+export const DOCUMENT_FORMAT_VERSION = 3;
 
 export const CertaintySchema = z.enum(["certain", "probable", "uncertain"]);
 
@@ -130,6 +130,26 @@ export const ParagraphFormattingSchema = z
     }
   });
 
+const DocumentDefaultParagraphFormattingSchema = z.object({
+  spacingBeforePt: SafePointsSchema,
+  spacingAfterPt: SafePointsSchema,
+  lineHeight: z.number().finite().min(1).max(3),
+});
+
+const DocumentDefaultHeadingFormattingSchema = z.object({
+  spacingBeforePt: SafePointsSchema,
+  spacingAfterPt: SafePointsSchema,
+  lineHeight: z.number().finite().min(1).max(3).optional(),
+});
+
+export const DocumentDefaultsSchema = z.object({
+  bodyParagraph: DocumentDefaultParagraphFormattingSchema,
+  heading1: DocumentDefaultHeadingFormattingSchema,
+  heading2: DocumentDefaultHeadingFormattingSchema,
+  heading3: DocumentDefaultHeadingFormattingSchema,
+  heading4: DocumentDefaultHeadingFormattingSchema,
+});
+
 export const SupportedImageMimeTypeSchema = z.enum(["image/png", "image/jpeg", "image/gif"]);
 
 const Base64Schema = z.string().regex(/^[A-Za-z0-9+/]*={0,2}$/);
@@ -167,10 +187,18 @@ export const AssetSchema = z
       });
     }
     if (!asset.fileName && !asset.name) {
-      context.addIssue({ code: "custom", message: "image asset requires a file name", path: ["fileName"] });
+      context.addIssue({
+        code: "custom",
+        message: "image asset requires a file name",
+        path: ["fileName"],
+      });
     }
     if (!asset.dataBase64) {
-      context.addIssue({ code: "custom", message: "image asset requires base64 data", path: ["dataBase64"] });
+      context.addIssue({
+        code: "custom",
+        message: "image asset requires base64 data",
+        path: ["dataBase64"],
+      });
       return;
     }
     const declaredSize = asset.byteSize ?? asset.sizeBytes;
@@ -196,6 +224,7 @@ export const DocumentProjectSchema = z.object({
   formatVersion: z.literal(DOCUMENT_FORMAT_VERSION),
   metadata: MetadataSchema,
   pageSettings: PageSettingsSchema,
+  documentDefaults: DocumentDefaultsSchema,
   editorContent: TiptapJsonSchema,
   assets: z.array(AssetSchema),
   warnings: z.array(ImportWarningSchema),
@@ -210,6 +239,7 @@ export type ClassificationResult = z.infer<typeof ClassificationResultSchema>;
 export type BlockType = z.infer<typeof BlockTypeSchema>;
 export type PageSettings = z.infer<typeof PageSettingsSchema>;
 export type ParagraphFormatting = z.infer<typeof ParagraphFormattingSchema>;
+export type DocumentDefaults = z.infer<typeof DocumentDefaultsSchema>;
 export type DocumentAsset = z.infer<typeof AssetSchema>;
 export type DocumentProject = z.infer<typeof DocumentProjectSchema>;
 
@@ -230,8 +260,7 @@ export const defaultPageSettings: PageSettings = {
     bottom: 25,
     left: 25,
   },
-  bodyFontFamily:
-    "'Noto Sans CJK JP', 'Noto Sans JP', 'Yu Gothic', 'Hiragino Sans', sans-serif",
+  bodyFontFamily: "'Noto Sans CJK JP', 'Noto Sans JP', 'Yu Gothic', 'Hiragino Sans', sans-serif",
   bodyFontSizePt: 11,
   lineHeight: 1.6,
   paragraphSpacingBeforePt: 0,
@@ -239,6 +268,34 @@ export const defaultPageSettings: PageSettings = {
   header: "",
   footer: "",
   pageNumbers: true,
+};
+
+export const defaultDocumentDefaults: DocumentDefaults = {
+  bodyParagraph: {
+    spacingBeforePt: 0,
+    spacingAfterPt: 6,
+    lineHeight: 1.5,
+  },
+  heading1: {
+    spacingBeforePt: 12,
+    spacingAfterPt: 6,
+    lineHeight: 1.5,
+  },
+  heading2: {
+    spacingBeforePt: 10,
+    spacingAfterPt: 6,
+    lineHeight: 1.5,
+  },
+  heading3: {
+    spacingBeforePt: 8,
+    spacingAfterPt: 4,
+    lineHeight: 1.5,
+  },
+  heading4: {
+    spacingBeforePt: 6,
+    spacingAfterPt: 4,
+    lineHeight: 1.5,
+  },
 };
 
 export const emptyTiptapDocument = {
@@ -264,6 +321,7 @@ export function createNewProject(now = new Date()): DocumentProject {
       title: "無題の文書",
     },
     pageSettings: defaultPageSettings,
+    documentDefaults: defaultDocumentDefaults,
     editorContent: emptyTiptapDocument,
     assets: [],
     warnings: [],
@@ -294,7 +352,11 @@ function collectMissingImageAssetIds(value: unknown, assetIds: Set<string>): str
   const missing: string[] = [];
   if (node.type === "image" && typeof node.attrs === "object" && node.attrs !== null) {
     const attrs = node.attrs as { assetId?: unknown };
-    if (typeof attrs.assetId === "string" && attrs.assetId.length > 0 && !assetIds.has(attrs.assetId)) {
+    if (
+      typeof attrs.assetId === "string" &&
+      attrs.assetId.length > 0 &&
+      !assetIds.has(attrs.assetId)
+    ) {
       missing.push(attrs.assetId);
     }
   }

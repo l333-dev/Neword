@@ -88,6 +88,20 @@ export function pixelsToEmu(pixels: number, dpi = DEFAULT_PIXEL_DPI): number {
   return inchesToEmu(pixels / dpi);
 }
 
+export function pixelsToPoints(pixels: number, dpi = DEFAULT_PIXEL_DPI): number {
+  assertNonNegativeUnit(pixels, "pixel");
+  assertNonNegativeUnit(dpi, "DPI");
+  if (dpi === 0) throw new RangeError("DPI must be greater than zero");
+  return (pixels / dpi) * POINTS_PER_INCH;
+}
+
+export function pointsToPixels(points: number, dpi = DEFAULT_PIXEL_DPI): number {
+  assertNonNegativeUnit(points, "point");
+  assertNonNegativeUnit(dpi, "DPI");
+  if (dpi === 0) throw new RangeError("DPI must be greater than zero");
+  return roundOoxml((points / POINTS_PER_INCH) * dpi);
+}
+
 export function emuToPixels(emu: number, dpi = DEFAULT_PIXEL_DPI): number {
   assertNonNegativeUnit(emu, "EMU");
   assertNonNegativeUnit(dpi, "DPI");

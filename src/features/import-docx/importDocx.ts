@@ -11,11 +11,12 @@ import {
   type PageSettings,
   type ParagraphFormatting,
 } from "../../document-model/schema";
-import {
-  twipsToMillimeters,
-  twipsToPoints,
-} from "../../converters/units";
-import type { DocxImageRelationship, DocxInspection, DocxParagraphFormatting } from "../../project/fileAccess";
+import { twipsToMillimeters, twipsToPoints } from "../../converters/units";
+import type {
+  DocxImageRelationship,
+  DocxInspection,
+  DocxParagraphFormatting,
+} from "../../project/fileAccess";
 
 const ALLOWED_TAGS = [
   "p",
@@ -186,7 +187,9 @@ export async function convertDocxArrayBufferToImportResult({
   ];
 
   if (document.blocks.length === 0) {
-    warnings.push(warning("docx.empty_document", "読み込める本文が見つかりませんでした。", "warning"));
+    warnings.push(
+      warning("docx.empty_document", "読み込める本文が見つかりませんでした。", "warning"),
+    );
   }
 
   return {
@@ -206,14 +209,17 @@ export function importDocumentFromHtml(html: string): ImportDocument {
     sanitizedHtml: html,
     stats: {
       headingCount: blocks.filter((block) => block.classification.blockType === "heading").length,
-      paragraphCount: blocks.filter((block) => block.classification.blockType === "paragraph").length,
+      paragraphCount: blocks.filter((block) => block.classification.blockType === "paragraph")
+        .length,
       tableCount: blocks.filter((block) => block.classification.blockType === "table").length,
       imageCount: blocks.filter((block) => block.classification.blockType === "image").length,
       retainedImageCount: blocks.filter(
-        (block) => block.classification.blockType === "image" && block.html.includes("data-asset-id="),
+        (block) =>
+          block.classification.blockType === "image" && block.html.includes("data-asset-id="),
       ).length,
-      warningImageCount: blocks.filter((block) => block.classification.blockType === "image" && block.warnings.length > 0)
-        .length,
+      warningImageCount: blocks.filter(
+        (block) => block.classification.blockType === "image" && block.warnings.length > 0,
+      ).length,
       unsupportedImageFormats: [...unsupportedImageFormats],
     },
   };
@@ -232,11 +238,23 @@ function blockFromElement(element: Element, index: number): ImportDocumentBlock 
   const blockWarnings: ImportWarning[] = [];
   if (tag === "div" && element.getAttribute("data-page-break") !== "true") {
     blockWarnings.push(
-      warning("html.unsupported_block", "未対応のブロック要素を段落相当として扱います。", "warning", id),
+      warning(
+        "html.unsupported_block",
+        "未対応のブロック要素を段落相当として扱います。",
+        "warning",
+        id,
+      ),
     );
   }
   if ((tag === "img" || element.querySelector("img")) && !imageHasAssetReference(element)) {
-    blockWarnings.push(warning("image.unresolved_reference", "画像に対応する内部アセットが見つかりません。", "warning", id));
+    blockWarnings.push(
+      warning(
+        "image.unresolved_reference",
+        "画像に対応する内部アセットが見つかりません。",
+        "warning",
+        id,
+      ),
+    );
   }
 
   const input: ClassificationInput = {
@@ -280,30 +298,81 @@ function warningsFromInspection(inspection: DocxInspection | undefined): ImportW
 
   const warnings: ImportWarning[] = [];
   if (inspection.has_macros) {
-    warnings.push(warning("docx.macros_detected", "マクロを含む文書です。マクロは実行・保持しません。", "warning"));
+    warnings.push(
+      warning(
+        "docx.macros_detected",
+        "マクロを含む文書です。マクロは実行・保持しません。",
+        "warning",
+      ),
+    );
   }
   if (inspection.has_headers) {
-    warnings.push(warning("docx.unsupported_headers", "ヘッダーは検出しましたが、本文には変換しません。", "warning"));
+    warnings.push(
+      warning(
+        "docx.unsupported_headers",
+        "ヘッダーは検出しましたが、本文には変換しません。",
+        "warning",
+      ),
+    );
   }
   if (inspection.has_footers) {
-    warnings.push(warning("docx.unsupported_footers", "フッターは検出しましたが、本文には変換しません。", "warning"));
+    warnings.push(
+      warning(
+        "docx.unsupported_footers",
+        "フッターは検出しましたが、本文には変換しません。",
+        "warning",
+      ),
+    );
   }
   if (!inspection.has_styles_xml) {
-    warnings.push(warning("docx.missing_styles", "styles.xmlが見つからないため、書式情報が不足する可能性があります。", "info"));
+    warnings.push(
+      warning(
+        "docx.missing_styles",
+        "styles.xmlが見つからないため、書式情報が不足する可能性があります。",
+        "info",
+      ),
+    );
   }
   if (!inspection.has_numbering_xml) {
-    warnings.push(warning("docx.missing_numbering", "numbering.xmlが見つからないため、リスト情報が不足する可能性があります。", "info"));
+    warnings.push(
+      warning(
+        "docx.missing_numbering",
+        "numbering.xmlが見つからないため、リスト情報が不足する可能性があります。",
+        "info",
+      ),
+    );
   }
 
   for (const entry of inspection.entries) {
     if (entry.name === "word/comments.xml") {
-      warnings.push(warning("docx.unsupported_comments", "コメントは未対応のため読み込みません。", "warning", entry.name));
+      warnings.push(
+        warning(
+          "docx.unsupported_comments",
+          "コメントは未対応のため読み込みません。",
+          "warning",
+          entry.name,
+        ),
+      );
     }
     if (entry.name === "word/footnotes.xml" || entry.name === "word/endnotes.xml") {
-      warnings.push(warning("docx.unsupported_notes", "脚注または文末脚注は未対応のため読み込みません。", "warning", entry.name));
+      warnings.push(
+        warning(
+          "docx.unsupported_notes",
+          "脚注または文末脚注は未対応のため読み込みません。",
+          "warning",
+          entry.name,
+        ),
+      );
     }
     if (entry.name.includes("/charts/") || entry.name.includes("/diagrams/")) {
-      warnings.push(warning("docx.unsupported_drawing", "グラフまたはSmartArtは未対応です。", "warning", entry.name));
+      warnings.push(
+        warning(
+          "docx.unsupported_drawing",
+          "グラフまたはSmartArtは未対応です。",
+          "warning",
+          entry.name,
+        ),
+      );
     }
   }
   if (inspection.sections.length > 1) {
@@ -313,43 +382,75 @@ function warningsFromInspection(inspection: DocxInspection | undefined): ImportW
         "複数セクションを検出しました。今回は最初のセクション設定だけを文書全体へ適用します。",
         "warning",
         "word/document.xml",
-        { part: "word/document.xml", originalValue: inspection.sections.length, fallbackValue: "first_section" },
+        {
+          part: "word/document.xml",
+          originalValue: inspection.sections.length,
+          fallbackValue: "first_section",
+        },
       ),
     );
   }
   for (const section of inspection.sections) {
-    if (section.index > 0 && section.break_type && !["nextPage", "continuous", "evenPage", "oddPage"].includes(section.break_type)) {
+    if (
+      section.index > 0 &&
+      section.break_type &&
+      !["nextPage", "continuous", "evenPage", "oddPage"].includes(section.break_type)
+    ) {
       warnings.push(
-        warning("section.unsupported_break_type", "未対応のセクション区切り種別を検出しました。", "warning", "word/document.xml", {
-          part: "word/document.xml",
-          paragraphIndex: section.paragraph_index ?? undefined,
-          originalValue: section.break_type,
-          fallbackValue: "ignored",
-        }),
+        warning(
+          "section.unsupported_break_type",
+          "未対応のセクション区切り種別を検出しました。",
+          "warning",
+          "word/document.xml",
+          {
+            part: "word/document.xml",
+            paragraphIndex: section.paragraph_index ?? undefined,
+            originalValue: section.break_type,
+            fallbackValue: "ignored",
+          },
+        ),
       );
     }
     if (section.has_columns) {
       warnings.push(
-        warning("section.columns_unsupported", "段組み設定は検出のみ行い、本文には反映しません。", "warning", "word/document.xml", {
-          part: "word/document.xml",
-          paragraphIndex: section.paragraph_index ?? undefined,
-        }),
+        warning(
+          "section.columns_unsupported",
+          "段組み設定は検出のみ行い、本文には反映しません。",
+          "warning",
+          "word/document.xml",
+          {
+            part: "word/document.xml",
+            paragraphIndex: section.paragraph_index ?? undefined,
+          },
+        ),
       );
     }
     if (section.has_page_borders) {
       warnings.push(
-        warning("section.page_borders_unsupported", "ページ罫線は検出のみ行い、書き出しには反映しません。", "warning", "word/document.xml", {
-          part: "word/document.xml",
-          paragraphIndex: section.paragraph_index ?? undefined,
-        }),
+        warning(
+          "section.page_borders_unsupported",
+          "ページ罫線は検出のみ行い、書き出しには反映しません。",
+          "warning",
+          "word/document.xml",
+          {
+            part: "word/document.xml",
+            paragraphIndex: section.paragraph_index ?? undefined,
+          },
+        ),
       );
     }
     if (section.has_title_page) {
       warnings.push(
-        warning("section.different_headers_footers", "先頭ページだけ異なるヘッダー/フッター設定を検出しましたが保持しません。", "warning", "word/document.xml", {
-          part: "word/document.xml",
-          paragraphIndex: section.paragraph_index ?? undefined,
-        }),
+        warning(
+          "section.different_headers_footers",
+          "先頭ページだけ異なるヘッダー/フッター設定を検出しましたが保持しません。",
+          "warning",
+          "word/document.xml",
+          {
+            part: "word/document.xml",
+            paragraphIndex: section.paragraph_index ?? undefined,
+          },
+        ),
       );
     }
   }
@@ -361,7 +462,8 @@ function pageSettingsFromInspection(inspection: DocxInspection | undefined): {
   pageSettings: PageSettings;
   warnings: ImportWarning[];
 } {
-  if (!inspection?.sections[0]?.page_settings) return { pageSettings: defaultPageSettings, warnings: [] };
+  if (!inspection?.sections[0]?.page_settings)
+    return { pageSettings: defaultPageSettings, warnings: [] };
   const settings = inspection.sections[0].page_settings;
   const warnings: ImportWarning[] = [];
   const rawWidth = settings.width_twips;
@@ -371,23 +473,42 @@ function pageSettingsFromInspection(inspection: DocxInspection | undefined): {
   let orientation: PageSettings["orientation"] =
     settings.orientation === "landscape" || widthMm > heightMm ? "landscape" : "portrait";
 
-  if (settings.orientation && settings.orientation !== "landscape" && settings.orientation !== "portrait") {
+  if (
+    settings.orientation &&
+    settings.orientation !== "landscape" &&
+    settings.orientation !== "portrait"
+  ) {
     warnings.push(
-      warning("page.unsupported_orientation", "未対応のページ方向です。用紙サイズから方向を推定します。", "warning", "word/document.xml", {
-        part: "word/document.xml",
-        originalValue: settings.orientation,
-        fallbackValue: orientation,
-      }),
+      warning(
+        "page.unsupported_orientation",
+        "未対応のページ方向です。用紙サイズから方向を推定します。",
+        "warning",
+        "word/document.xml",
+        {
+          part: "word/document.xml",
+          originalValue: settings.orientation,
+          fallbackValue: orientation,
+        },
+      ),
     );
   }
 
   if (!isReasonablePageDimension(widthMm) || !isReasonablePageDimension(heightMm)) {
     warnings.push(
-      warning("page.invalid_size", "ページサイズが異常なためA4既定値へ戻します。", "warning", "word/document.xml", {
-        part: "word/document.xml",
-        originalValue: { width_twips: rawWidth, height_twips: rawHeight },
-        fallbackValue: { widthMm: defaultPageSettings.widthMm, heightMm: defaultPageSettings.heightMm },
-      }),
+      warning(
+        "page.invalid_size",
+        "ページサイズが異常なためA4既定値へ戻します。",
+        "warning",
+        "word/document.xml",
+        {
+          part: "word/document.xml",
+          originalValue: { width_twips: rawWidth, height_twips: rawHeight },
+          fallbackValue: {
+            widthMm: defaultPageSettings.widthMm,
+            heightMm: defaultPageSettings.heightMm,
+          },
+        },
+      ),
     );
     widthMm = defaultPageSettings.widthMm;
     heightMm = defaultPageSettings.heightMm;
@@ -403,18 +524,37 @@ function pageSettingsFromInspection(inspection: DocxInspection | undefined): {
     rightMm: twipsToMarginMm(margins?.right_twips, defaultPageSettings.margins.rightMm),
     bottomMm: twipsToMarginMm(margins?.bottom_twips, defaultPageSettings.margins.bottomMm),
     leftMm: twipsToMarginMm(margins?.left_twips, defaultPageSettings.margins.leftMm),
-    headerMm: margins?.header_twips === null || margins?.header_twips === undefined ? undefined : twipsToMillimeters(margins.header_twips),
-    footerMm: margins?.footer_twips === null || margins?.footer_twips === undefined ? undefined : twipsToMillimeters(margins.footer_twips),
-    gutterMm: margins?.gutter_twips === null || margins?.gutter_twips === undefined ? undefined : twipsToMillimeters(margins.gutter_twips),
+    headerMm:
+      margins?.header_twips === null || margins?.header_twips === undefined
+        ? undefined
+        : twipsToMillimeters(margins.header_twips),
+    footerMm:
+      margins?.footer_twips === null || margins?.footer_twips === undefined
+        ? undefined
+        : twipsToMillimeters(margins.footer_twips),
+    gutterMm:
+      margins?.gutter_twips === null || margins?.gutter_twips === undefined
+        ? undefined
+        : twipsToMillimeters(margins.gutter_twips),
   };
 
-  if (Object.values(marginsFromDocx).some((value) => typeof value === "number" && (value < 0 || value > 250))) {
+  if (
+    Object.values(marginsFromDocx).some(
+      (value) => typeof value === "number" && (value < 0 || value > 250),
+    )
+  ) {
     warnings.push(
-      warning("page.invalid_margins", "ページ余白が異常なため既定余白へ戻します。", "warning", "word/document.xml", {
-        part: "word/document.xml",
-        originalValue: margins,
-        fallbackValue: defaultPageSettings.margins,
-      }),
+      warning(
+        "page.invalid_margins",
+        "ページ余白が異常なため既定余白へ戻します。",
+        "warning",
+        "word/document.xml",
+        {
+          part: "word/document.xml",
+          originalValue: margins,
+          fallbackValue: defaultPageSettings.margins,
+        },
+      ),
     );
     return { pageSettings: defaultPageSettings, warnings };
   }
@@ -479,12 +619,18 @@ function convertParagraphFormatting(
   if (alignment) formatting.alignment = alignment;
   if (paragraph.alignment && !alignment) {
     warnings.push(
-      warning("paragraph.unsupported_alignment", "未対応の段落揃えです。左揃えとして扱います。", "warning", `paragraph:${paragraph.index}`, {
-        part: "word/document.xml",
-        paragraphIndex: paragraph.index,
-        originalValue: paragraph.alignment,
-        fallbackValue: "left",
-      }),
+      warning(
+        "paragraph.unsupported_alignment",
+        "未対応の段落揃えです。左揃えとして扱います。",
+        "warning",
+        `paragraph:${paragraph.index}`,
+        {
+          part: "word/document.xml",
+          paragraphIndex: paragraph.index,
+          originalValue: paragraph.alignment,
+          fallbackValue: "left",
+        },
+      ),
     );
     formatting.alignment = "left";
   }
@@ -496,12 +642,24 @@ function convertParagraphFormatting(
   if (indentRightMm !== undefined) formatting.indentRightMm = indentRightMm;
   if (firstLineIndentMm !== undefined) formatting.firstLineIndentMm = firstLineIndentMm;
   if (hangingIndentMm !== undefined) formatting.hangingIndentMm = hangingIndentMm;
-  if ([indentLeftMm, indentRightMm, firstLineIndentMm, hangingIndentMm].some((value) => value !== undefined && Math.abs(value) > 250)) {
-    warnings.push(warning("paragraph.invalid_indent", "段落インデントが大きすぎるため保持しません。", "warning", `paragraph:${paragraph.index}`, {
-      part: "word/document.xml",
-      paragraphIndex: paragraph.index,
-      originalValue: paragraph,
-    }));
+  if (
+    [indentLeftMm, indentRightMm, firstLineIndentMm, hangingIndentMm].some(
+      (value) => value !== undefined && Math.abs(value) > 250,
+    )
+  ) {
+    warnings.push(
+      warning(
+        "paragraph.invalid_indent",
+        "段落インデントが大きすぎるため保持しません。",
+        "warning",
+        `paragraph:${paragraph.index}`,
+        {
+          part: "word/document.xml",
+          paragraphIndex: paragraph.index,
+          originalValue: paragraph,
+        },
+      ),
+    );
     delete formatting.indentLeftMm;
     delete formatting.indentRightMm;
     delete formatting.firstLineIndentMm;
@@ -515,30 +673,79 @@ function convertParagraphFormatting(
     const lineSpacing = lineSpacingFromOoxml(paragraph.line_twips, paragraph.line_rule);
     if (lineSpacing) formatting.lineSpacing = lineSpacing;
     else {
-      warnings.push(warning("paragraph.unsupported_line_rule", "未対応の行間指定です。行間は保持しません。", "warning", `paragraph:${paragraph.index}`, {
-        part: "word/document.xml",
-        paragraphIndex: paragraph.index,
-        originalValue: { line: paragraph.line_twips, lineRule: paragraph.line_rule },
-      }));
+      warnings.push(
+        warning(
+          "paragraph.unsupported_line_rule",
+          "未対応の行間指定です。行間は保持しません。",
+          "warning",
+          `paragraph:${paragraph.index}`,
+          {
+            part: "word/document.xml",
+            paragraphIndex: paragraph.index,
+            originalValue: { line: paragraph.line_twips, lineRule: paragraph.line_rule },
+          },
+        ),
+      );
     }
+  }
+  if (beforePt !== undefined || afterPt !== undefined || formatting.lineSpacing) {
+    warnings.push(
+      warning(
+        "PARAGRAPH_SPACING_SIMPLIFIED",
+        "Word固有の段落間隔または行間設定を、このアプリの単純な段落書式へ変換しました。",
+        "info",
+        `paragraph:${paragraph.index}`,
+        {
+          part: "word/document.xml",
+          paragraphIndex: paragraph.index,
+          originalValue: {
+            spacingBeforeTwips: paragraph.spacing_before_twips,
+            spacingAfterTwips: paragraph.spacing_after_twips,
+            lineTwips: paragraph.line_twips,
+            lineRule: paragraph.line_rule,
+          },
+          fallbackValue: {
+            spaceBeforePt: formatting.spaceBeforePt,
+            spaceAfterPt: formatting.spaceAfterPt,
+            lineSpacing: formatting.lineSpacing,
+          },
+        },
+      ),
+    );
   }
   if (paragraph.page_break_before) formatting.pageBreakBefore = true;
   if (paragraph.keep_next) formatting.keepWithNext = true;
   if (paragraph.keep_lines) formatting.keepLinesTogether = true;
   if (paragraph.widow_control !== null) {
-    warnings.push(warning("paragraph.formatting_loss", "widowControlは検出のみ行い、書き出しには反映しません。", "info", `paragraph:${paragraph.index}`, {
-      part: "word/document.xml",
-      paragraphIndex: paragraph.index,
-      originalValue: paragraph.widow_control,
-    }));
+    warnings.push(
+      warning(
+        "paragraph.formatting_loss",
+        "widowControlは検出のみ行い、書き出しには反映しません。",
+        "info",
+        `paragraph:${paragraph.index}`,
+        {
+          part: "word/document.xml",
+          paragraphIndex: paragraph.index,
+          originalValue: paragraph.widow_control,
+        },
+      ),
+    );
   }
   const parsed = ParagraphFormattingSchema.safeParse(formatting);
   if (!parsed.success) {
-    warnings.push(warning("paragraph.invalid_spacing", "段落書式が内部検証に失敗したため保持しません。", "warning", `paragraph:${paragraph.index}`, {
-      part: "word/document.xml",
-      paragraphIndex: paragraph.index,
-      originalValue: formatting,
-    }));
+    warnings.push(
+      warning(
+        "paragraph.invalid_spacing",
+        "段落書式が内部検証に失敗したため保持しません。",
+        "warning",
+        `paragraph:${paragraph.index}`,
+        {
+          part: "word/document.xml",
+          paragraphIndex: paragraph.index,
+          originalValue: formatting,
+        },
+      ),
+    );
     return {};
   }
   return parsed.data;
@@ -580,9 +787,12 @@ function applyOoxmlFormattingToHtml(
   formatting: Map<number, ParagraphFormatting>,
   paragraphs: DocxParagraphFormatting[],
 ): string {
-  if (formatting.size === 0 && !paragraphs.some((paragraph) => paragraph.has_page_break)) return html;
+  if (formatting.size === 0 && !paragraphs.some((paragraph) => paragraph.has_page_break))
+    return html;
   const document = new DOMParser().parseFromString(html, "text/html");
-  const blocks = Array.from(document.body.children).filter((element) => /^(p|h[1-4])$/i.test(element.tagName));
+  const blocks = Array.from(document.body.children).filter((element) =>
+    /^(p|h[1-4])$/i.test(element.tagName),
+  );
   let blockIndex = 0;
   for (const paragraph of paragraphs) {
     if (isStandalonePageBreakParagraph(paragraph)) {
@@ -610,7 +820,10 @@ function applyOoxmlFormattingToHtml(
     element.setAttribute("data-paragraph-formatting", JSON.stringify(paragraphFormatting));
     const style = styleFromParagraphFormatting(paragraphFormatting);
     if (style) element.setAttribute("style", style);
-    if (paragraphFormatting.pageBreakBefore && element.previousElementSibling?.getAttribute("data-page-break") !== "true") {
+    if (
+      paragraphFormatting.pageBreakBefore &&
+      element.previousElementSibling?.getAttribute("data-page-break") !== "true"
+    ) {
       const pageBreak = document.createElement("div");
       pageBreak.setAttribute("data-page-break", "true");
       element.before(pageBreak);
@@ -647,13 +860,22 @@ function isStandalonePageBreakParagraph(paragraph: DocxParagraphFormatting): boo
 
 function styleFromParagraphFormatting(formatting: ParagraphFormatting): string {
   const declarations: string[] = [];
-  if (formatting.alignment) declarations.push(`text-align: ${formatting.alignment === "justify" ? "justify" : formatting.alignment}`);
-  if (formatting.indentLeftMm !== undefined) declarations.push(`margin-left: ${formatting.indentLeftMm}mm`);
-  if (formatting.indentRightMm !== undefined) declarations.push(`margin-right: ${formatting.indentRightMm}mm`);
-  if (formatting.firstLineIndentMm !== undefined) declarations.push(`text-indent: ${formatting.firstLineIndentMm}mm`);
-  if (formatting.hangingIndentMm !== undefined) declarations.push(`text-indent: -${formatting.hangingIndentMm}mm`);
-  if (formatting.spaceBeforePt !== undefined) declarations.push(`margin-top: ${formatting.spaceBeforePt}pt`);
-  if (formatting.spaceAfterPt !== undefined) declarations.push(`margin-bottom: ${formatting.spaceAfterPt}pt`);
+  if (formatting.alignment)
+    declarations.push(
+      `text-align: ${formatting.alignment === "justify" ? "justify" : formatting.alignment}`,
+    );
+  if (formatting.indentLeftMm !== undefined)
+    declarations.push(`margin-left: ${formatting.indentLeftMm}mm`);
+  if (formatting.indentRightMm !== undefined)
+    declarations.push(`margin-right: ${formatting.indentRightMm}mm`);
+  if (formatting.firstLineIndentMm !== undefined)
+    declarations.push(`text-indent: ${formatting.firstLineIndentMm}mm`);
+  if (formatting.hangingIndentMm !== undefined)
+    declarations.push(`text-indent: -${formatting.hangingIndentMm}mm`);
+  if (formatting.spaceBeforePt !== undefined)
+    declarations.push(`margin-top: ${formatting.spaceBeforePt}pt`);
+  if (formatting.spaceAfterPt !== undefined)
+    declarations.push(`margin-bottom: ${formatting.spaceAfterPt}pt`);
   if (formatting.lineSpacing?.type === "multiple" || formatting.lineSpacing?.type === "single") {
     declarations.push(`line-height: ${formatting.lineSpacing.value}`);
   }
@@ -733,7 +955,8 @@ function attachImageAssetsToHtml(html: string, assets: DocumentAsset[]): string 
 }
 
 function stableAssetId(relationship: DocxImageRelationship): string {
-  const checksum = relationship.checksum?.replace(/[^a-zA-Z0-9]/g, "-") ?? relationship.relationship_id;
+  const checksum =
+    relationship.checksum?.replace(/[^a-zA-Z0-9]/g, "-") ?? relationship.relationship_id;
   return `asset-${checksum}`;
 }
 
@@ -766,7 +989,9 @@ function warningsFromHtml(html: string): ImportWarning[] {
   for (const image of Array.from(document.images)) {
     const src = image.getAttribute("src") ?? "";
     if (/^https?:\/\//i.test(src)) {
-      warnings.push(warning("html.external_image", "外部リンク画像は自動取得しません。", "warning", src));
+      warnings.push(
+        warning("html.external_image", "外部リンク画像は自動取得しません。", "warning", src),
+      );
     }
   }
 

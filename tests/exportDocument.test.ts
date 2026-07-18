@@ -24,7 +24,9 @@ describe("DOCX export", () => {
         ...project,
         editorContent: {
           type: "doc",
-          content: [{ type: "image", attrs: { assetId: "asset-png", alt: "図1", width: 24, height: 24 } }],
+          content: [
+            { type: "image", attrs: { assetId: "asset-png", alt: "図1", width: 24, height: 24 } },
+          ],
         },
         assets: [
           {
@@ -42,7 +44,9 @@ describe("DOCX export", () => {
       }),
     );
     const zip = await JSZip.loadAsync(base64, { base64: true });
-    const mediaEntries = Object.keys(zip.files).filter((name) => name.startsWith("word/media/") && !zip.files[name]?.dir);
+    const mediaEntries = Object.keys(zip.files).filter(
+      (name) => name.startsWith("word/media/") && !zip.files[name]?.dir,
+    );
     expect(mediaEntries).toHaveLength(1);
     expect(mediaEntries[0]).toMatch(/\.png$/);
   });
@@ -109,6 +113,79 @@ describe("DOCX export", () => {
     expect(documentXml).toContain('w:line="360"');
     expect(documentXml).toContain("<w:keepNext");
     expect(documentXml).toContain("<w:keepLines");
+    expect(documentXml).toContain('<w:br w:type="page"');
+  });
+
+  it("writes explicit paragraph defaults when a paragraph has no local formatting", async () => {
+    const project = createNewProject(new Date("2026-07-15T00:00:00.000Z"));
+    const base64 = await exportDocumentToDocxBase64(
+      projectToExportDocument({
+        ...project,
+        documentDefaults: {
+          ...project.documentDefaults,
+          bodyParagraph: {
+            spacingBeforePt: 2,
+            spacingAfterPt: 10,
+            lineHeight: 1.75,
+          },
+        },
+        editorContent: {
+          type: "doc",
+          content: [{ type: "paragraph", content: [{ type: "text", text: "defaulted" }] }],
+        },
+      }),
+    );
+    const zip = await JSZip.loadAsync(base64, { base64: true });
+    const documentXml = await zip.file("word/document.xml")?.async("string");
+
+    expect(documentXml).toContain("<w:spacing");
+    expect(documentXml).toContain('w:before="40"');
+    expect(documentXml).toContain('w:after="200"');
+    expect(documentXml).toContain('w:line="420"');
+    expect(documentXml).toContain('w:lineRule="auto"');
+    expect(documentXml).toContain("<w:ind");
+    expect(documentXml).toContain("<w:jc");
+  });
+
+  it("keeps hardBreak distinct from paragraph and pageBreak", async () => {
+    const project = createNewProject(new Date("2026-07-15T00:00:00.000Z"));
+    const exportDocument = projectToExportDocument({
+      ...project,
+      editorContent: {
+        type: "doc",
+        content: [
+          {
+            type: "paragraph",
+            content: [
+              { type: "text", text: "line one" },
+              { type: "hardBreak" },
+              { type: "text", text: "line two" },
+            ],
+          },
+          { type: "paragraph", content: [{ type: "text", text: "next paragraph" }] },
+          { type: "pageBreak" },
+        ],
+      },
+    });
+
+    expect(exportDocument.blocks).toMatchObject([
+      {
+        type: "paragraph",
+        content: [
+          { type: "text", text: "line one" },
+          { type: "hard_break" },
+          { type: "text", text: "line two" },
+        ],
+      },
+      { type: "paragraph", content: [{ type: "text", text: "next paragraph" }] },
+      { type: "page_break" },
+    ]);
+
+    const base64 = await exportDocumentToDocxBase64(exportDocument);
+    const zip = await JSZip.loadAsync(base64, { base64: true });
+    const documentXml = await zip.file("word/document.xml")?.async("string");
+
+    expect(documentXml).toContain("<w:br/>");
     expect(documentXml).toContain('<w:br w:type="page"');
   });
 });

@@ -123,7 +123,12 @@ describe("DOCX fixture import", () => {
         ...project,
         editorContent: {
           type: "doc",
-          content: [{ type: "image", attrs: { assetId: result.assets[0]?.id, src: "data:image/png;base64,unused" } }],
+          content: [
+            {
+              type: "image",
+              attrs: { assetId: result.assets[0]?.id, src: "data:image/png;base64,unused" },
+            },
+          ],
         },
         assets: result.assets,
       }),
@@ -151,7 +156,8 @@ describe("DOCX fixture import", () => {
     const inspection = await inspectFixture(buffer);
     inspection.image_relationships.push({
       relationship_id: "rIdTiff",
-      relationship_type: "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image",
+      relationship_type:
+        "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image",
       target: "media/image.tiff",
       source_part: "word/document.xml",
       resolved_part: "word/media/image.tiff",
@@ -232,6 +238,7 @@ describe("DOCX fixture import", () => {
     expect(result.document.sanitizedHtml).toContain('data-page-break="true"');
     expect(result.document.sanitizedHtml).toContain("data-paragraph-formatting=");
     expect(result.document.sanitizedHtml).toContain("text-align: justify");
+    expect(result.warnings.map((item) => item.code)).toContain("PARAGRAPH_SPACING_SIMPLIFIED");
     expect(result.warnings.map((item) => item.code)).toContain("paragraph.formatting_loss");
   });
 
@@ -283,7 +290,12 @@ describe("DOCX fixture import", () => {
       ...project,
       editorContent: {
         type: "doc",
-        content: [{ type: "image", attrs: { assetId: result.assets[0]?.id, alt: "図1", width: 24, height: 24 } }],
+        content: [
+          {
+            type: "image",
+            attrs: { assetId: result.assets[0]?.id, alt: "図1", width: 24, height: 24 },
+          },
+        ],
       },
       assets: result.assets,
     });
@@ -306,7 +318,9 @@ describe("DOCX fixture import", () => {
         ...createNewProject(new Date("2026-07-17T00:00:00.000Z")),
         editorContent: {
           type: "doc",
-          content: [{ type: "image", attrs: { assetId: asset?.id, alt: "図1", width: 24, height: 24 } }],
+          content: [
+            { type: "image", attrs: { assetId: asset?.id, alt: "図1", width: 24, height: 24 } },
+          ],
         },
         assets: imported.assets,
       }),
@@ -316,7 +330,10 @@ describe("DOCX fixture import", () => {
     const exportedInspection = await inspectFixture(exportedBuffer);
     const exportedBytes = new Uint8Array(exportedBuffer);
     const reimported = await convertDocxArrayBufferToImportResult({
-      arrayBuffer: exportedBytes.buffer.slice(exportedBytes.byteOffset, exportedBytes.byteOffset + exportedBytes.byteLength),
+      arrayBuffer: exportedBytes.buffer.slice(
+        exportedBytes.byteOffset,
+        exportedBytes.byteOffset + exportedBytes.byteLength,
+      ),
       sourceInfo: sourceInfo(exportedBuffer.byteLength),
       inspection: exportedInspection,
     });
@@ -379,7 +396,10 @@ describe("DOCX fixture import", () => {
     await attachLayoutInspection(exportedInspection, exportedBuffer);
     const exportedBytes = new Uint8Array(exportedBuffer);
     const reimported = await convertDocxArrayBufferToImportResult({
-      arrayBuffer: exportedBytes.buffer.slice(exportedBytes.byteOffset, exportedBytes.byteOffset + exportedBytes.byteLength),
+      arrayBuffer: exportedBytes.buffer.slice(
+        exportedBytes.byteOffset,
+        exportedBytes.byteOffset + exportedBytes.byteLength,
+      ),
       sourceInfo: sourceInfo(exportedBuffer.byteLength),
       inspection: exportedInspection,
     });
@@ -391,7 +411,9 @@ describe("DOCX fixture import", () => {
     expect(reimported.document.sanitizedHtml).toContain("second paragraph");
     expect(reimported.document.sanitizedHtml).toContain("text-align: center");
     expect(reimported.document.sanitizedHtml).toContain("text-align: right");
-    expect((reimported.document.sanitizedHtml.match(/data-page-break="true"/g) ?? []).length).toBeGreaterThanOrEqual(1);
+    expect(
+      (reimported.document.sanitizedHtml.match(/data-page-break="true"/g) ?? []).length,
+    ).toBeGreaterThanOrEqual(1);
   });
 });
 
@@ -440,7 +462,9 @@ async function importFixture(path: string) {
   });
 }
 
-async function imageRelationshipsFromZip(zip: JSZip): Promise<DocxInspection["image_relationships"]> {
+async function imageRelationshipsFromZip(
+  zip: JSZip,
+): Promise<DocxInspection["image_relationships"]> {
   const rels = zip.file("word/_rels/document.xml.rels");
   if (!rels) return [];
   const xml = await rels.async("string");
@@ -448,7 +472,8 @@ async function imageRelationshipsFromZip(zip: JSZip): Promise<DocxInspection["im
   const relationships: DocxInspection["image_relationships"] = [];
   for (const match of matches) {
     const attrs = attrsFromXml(match[1] ?? "");
-    if (attrs.Type !== "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image") continue;
+    if (attrs.Type !== "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image")
+      continue;
     const external = attrs.TargetMode === "External";
     const resolvedPart = external ? null : `word/${attrs.Target ?? ""}`;
     const file = resolvedPart ? zip.file(resolvedPart) : null;
@@ -466,7 +491,11 @@ async function imageRelationshipsFromZip(zip: JSZip): Promise<DocxInspection["im
       external,
       checksum: bytes ? `test:${Buffer.from(bytes).toString("base64").slice(0, 12)}` : null,
       warning_code: external ? "image.external_relationship" : file ? null : "image.missing_part",
-      warning_message: external ? "外部画像relationshipは読み込みません。" : file ? null : "画像partが見つかりません。",
+      warning_message: external
+        ? "外部画像relationshipは読み込みません。"
+        : file
+          ? null
+          : "画像partが見つかりません。",
     });
   }
   return relationships;
@@ -508,33 +537,38 @@ async function attachLayoutInspection(inspection: DocxInspection, buffer: Buffer
       has_title_page: false,
     },
   ];
-  inspection.paragraphs = [...documentXml.matchAll(/<w:p(?:\s[^>]*)?>[\s\S]*?<\/w:p>/g)].map((match, index) => {
-    const paragraphXml = match[0];
-    const ind = prefixedAttrs(paragraphXml.match(/<w:ind\s+([^>]*)\/>/)?.[1] ?? "");
-    const spacing = prefixedAttrs(paragraphXml.match(/<w:spacing\s+([^>]*)\/>/)?.[1] ?? "");
-    return {
-      index,
-      alignment: prefixedAttrs(paragraphXml.match(/<w:jc\s+([^>]*)\/>/)?.[1] ?? "").val ?? null,
-      indent_left_twips: numberOrNull(ind.left),
-      indent_right_twips: numberOrNull(ind.right),
-      first_line_twips: numberOrNull(ind.firstLine),
-      hanging_twips: numberOrNull(ind.hanging),
-      spacing_before_twips: numberOrNull(spacing.before),
-      spacing_after_twips: numberOrNull(spacing.after),
-      line_twips: numberOrNull(spacing.line),
-      line_rule: spacing.lineRule ?? null,
-      page_break_before: paragraphXml.includes("<w:pageBreakBefore"),
-      keep_next: paragraphXml.includes("<w:keepNext"),
-      keep_lines: paragraphXml.includes("<w:keepLines"),
-      widow_control: null,
-      has_page_break: paragraphXml.includes('w:type="page"'),
-    };
-  });
+  inspection.paragraphs = [...documentXml.matchAll(/<w:p(?:\s[^>]*)?>[\s\S]*?<\/w:p>/g)].map(
+    (match, index) => {
+      const paragraphXml = match[0];
+      const ind = prefixedAttrs(paragraphXml.match(/<w:ind\s+([^>]*)\/>/)?.[1] ?? "");
+      const spacing = prefixedAttrs(paragraphXml.match(/<w:spacing\s+([^>]*)\/>/)?.[1] ?? "");
+      return {
+        index,
+        alignment: prefixedAttrs(paragraphXml.match(/<w:jc\s+([^>]*)\/>/)?.[1] ?? "").val ?? null,
+        indent_left_twips: numberOrNull(ind.left),
+        indent_right_twips: numberOrNull(ind.right),
+        first_line_twips: numberOrNull(ind.firstLine),
+        hanging_twips: numberOrNull(ind.hanging),
+        spacing_before_twips: numberOrNull(spacing.before),
+        spacing_after_twips: numberOrNull(spacing.after),
+        line_twips: numberOrNull(spacing.line),
+        line_rule: spacing.lineRule ?? null,
+        page_break_before: paragraphXml.includes("<w:pageBreakBefore"),
+        keep_next: paragraphXml.includes("<w:keepNext"),
+        keep_lines: paragraphXml.includes("<w:keepLines"),
+        widow_control: null,
+        has_page_break: paragraphXml.includes('w:type="page"'),
+      };
+    },
+  );
 }
 
 function prefixedAttrs(xml: string): Record<string, string> {
   return Object.fromEntries(
-    [...xml.matchAll(/(?:\w+:)?([A-Za-z]+)="([^"]*)"/g)].map((match) => [match[1] ?? "", match[2] ?? ""]),
+    [...xml.matchAll(/(?:\w+:)?([A-Za-z]+)="([^"]*)"/g)].map((match) => [
+      match[1] ?? "",
+      match[2] ?? "",
+    ]),
   );
 }
 
@@ -545,7 +579,8 @@ function numberOrNull(value: string | undefined): number | null {
 }
 
 function mimeTypeFromBytes(bytes: Uint8Array): string | null {
-  if (bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) return "image/png";
+  if (bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47)
+    return "image/png";
   if (bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return "image/jpeg";
   if (String.fromCharCode(...bytes.slice(0, 6)) === "GIF89a") return "image/gif";
   return null;

@@ -7,7 +7,9 @@ import {
   mmToEmu,
   mmToTwips,
   pixelsToEmu,
+  pixelsToPoints,
   pointsToHalfPoints,
+  pointsToPixels,
   pointsToTwips,
   twipsToMillimeters,
   twipsToPoints,
@@ -34,9 +36,15 @@ describe("unit conversions", () => {
     expect(mmToEmu(25.4)).toBe(914400);
   });
 
+  it("converts pixels and points for editor defaults", () => {
+    expect(pixelsToPoints(8)).toBe(6);
+    expect(pointsToPixels(6)).toBe(8);
+  });
+
   it("rejects invalid unit inputs", () => {
     expect(() => pixelsToEmu(-1)).toThrow(RangeError);
     expect(() => pixelsToEmu(1, 0)).toThrow(RangeError);
+    expect(() => pixelsToPoints(1, 0)).toThrow(RangeError);
     expect(() => mmToTwips(Number.NaN)).toThrow(RangeError);
   });
 });

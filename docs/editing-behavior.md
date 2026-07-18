@@ -1,0 +1,181 @@
+# Editing Behavior and Preferences
+
+## Enter and Shift+Enter
+
+In normal paragraphs, Enter creates a new paragraph. Shift+Enter creates a `hardBreak` inside the same paragraph.
+
+The two operations are stored differently:
+
+- Enter: separate `paragraph` nodes.
+- Shift+Enter: a `hardBreak` inline node inside one `paragraph`.
+
+The user can swap the roles of Enter and Shift+Enter in personal editing preferences. Changing that preference does not rewrite existing Tiptap JSON.
+
+Backspace at the start of an empty normal paragraph uses Tiptap's standard join behavior and merges naturally with the previous paragraph. Lists, tables, headings, and nodes near page breaks continue to use Tiptap's structural editing behavior.
+
+## Paragraphs, Hard Breaks, and Page Breaks
+
+Visual spacing is not represented by automatically inserted empty paragraphs. Empty paragraphs are allowed when the user explicitly creates them, but the app does not create them to simulate paragraph spacing.
+
+Page breaks are represented by the dedicated `pageBreak` node. They are not represented by repeated newlines or empty paragraphs.
+
+## Personal Display Preferences
+
+Personal editing preferences are stored outside `DocumentProject` in local app storage. They control:
+
+- Theme: light, dark, or system.
+- Accent color.
+- UI font scale.
+- Editor maximum width.
+- Enter and Shift+Enter behavior.
+- Visual line height.
+- Visual paragraph, heading, list item, and blockquote spacing.
+- Empty paragraph display height.
+- Formatting mark visibility.
+- Whether trailing empty paragraphs are trimmed when saving.
+
+These settings are display and input preferences. Changing them does not change the document's semantic content or DOCX paragraph formatting.
+
+The editor applies display values with CSS variables:
+
+- `--editor-line-height`
+- `--paragraph-space-before`
+- `--paragraph-space-after`
+- `--heading-space-before`
+- `--heading-space-after`
+
+Visual line height is only the editor display line height. Document line height is stored separately in `DocumentProject` paragraph formatting or document defaults and is the only value used for DOCX export.
+
+Visual paragraph and heading spacing are also display-only. They are not written into paragraph node attributes, project JSON, or DOCX output unless the user explicitly applies settings to document defaults or selected paragraphs.
+
+Built-in visual spacing presets:
+
+- Compact: line height 1.25, paragraph after 4px, heading before 12px, heading after 4px.
+- Normal: line height 1.5, paragraph after 8px, heading before 16px, heading after 8px.
+- Relaxed: line height 1.75, paragraph after 12px, heading before 24px, heading after 12px.
+
+## User Preferences Storage
+
+User preferences are separate from document data. They are validated with Zod before use and are not stored inside `DocumentProject`.
+
+The current user preference format is `USER_PREFERENCES_FORMAT_VERSION = 1`. This is independent from `DOCUMENT_FORMAT_VERSION`.
+
+The current storage backend is `localStorage`, isolated behind a small storage abstraction so it can later move to a Tauri app settings file without changing React UI code.
+
+Storage keys:
+
+- Current key: `neword.userPreferences.v1`
+- Legacy editing-only key: `neword.editingPreferences.v1`
+
+Load order:
+
+1. Read `neword.userPreferences.v1`.
+2. If it exists and validates, use it.
+3. If it is corrupted or invalid, recover safely using defaults or valid categories.
+4. If the new key does not exist, read `neword.editingPreferences.v1`.
+5. If the legacy value validates, copy it into `UserPreferences.editing` and save the new key.
+6. The legacy key is not deleted automatically.
+
+Corrupted JSON is backed up through the storage abstraction when possible. Unsupported future preference versions are not migrated; the app falls back to built-in defaults and reports a warning.
+
+Saved user preferences must not include document content, `editorContent`, imported text, or DOCX data.
+
+## Layout Preferences
+
+Layout preferences are personal display settings. They are stored in `UserPreferences.layout` and never in `DocumentProject`.
+
+They control:
+
+- Whether the outline sidebar is visible.
+- Whether the settings panel is visible.
+- Whether the editor toolbar is visible.
+- Whether the normal save status is visible.
+- Whether the outline sidebar is placed on the left or right.
+- Whether the settings panel is placed on the left or right.
+
+Save errors are still shown even when normal save status display is disabled.
+
+The settings panel can always be reopened from the fixed topbar settings button or with `Ctrl+,`.
+
+When both side panels are assigned to the same side, the sidebar is the outside panel and settings is the inside panel:
+
+- Left side: `sidebar -> settings -> editor`
+- Right side: `editor -> settings -> sidebar`
+
+This order is resolved by a pure layout function before rendering.
+
+On narrow screens, the app temporarily hides the sidebar and shows settings as an overlay so the editor remains usable. This responsive fallback does not change saved `UserPreferences`.
+
+## Toolbar Preferences
+
+Toolbar preferences are stored in `UserPreferences.toolbar` and `UserPreferences.layout`.
+
+Saved toolbar values are:
+
+- Command order as toolbar command IDs.
+- Hidden command IDs.
+- Button size: small, medium, or large.
+- Whether button labels are shown.
+- Toolbar visibility.
+- Toolbar position: top or bottom for the current implementation.
+
+The fixed topbar settings button is not a toolbar command and cannot be hidden by toolbar preferences.
+
+Unknown toolbar command IDs are removed when preferences are loaded or updated. Duplicate IDs are collapsed to one entry. If a future app version adds a new command and it is missing from an older saved order, the command is appended from the built-in default order so it remains available.
+
+Saved `left` or `right` toolbar positions are kept for future compatibility, but the current renderer safely displays them as top.
+
+Toolbar changes do not update Tiptap JSON, `DocumentProject`, DOCX import/export data, or document dirty state.
+
+## Document Formatting
+
+DOCX-facing paragraph formatting is stored separately in `DocumentProject`.
+
+Per-paragraph formatting is stored on Tiptap paragraph and heading nodes as validated `paragraphFormatting` attributes. New projects also store `documentDefaults`, including body paragraph spacing and heading spacing. Existing documents are not overwritten when the user changes personal preferences.
+
+When a new document is created, the app copies the current new-document defaults into `DocumentProject.documentDefaults`. After creation, those defaults belong to the document.
+
+## Paragraph Gap Rule
+
+The app uses a simple explicit rule for paragraph gaps:
+
+```ts
+resolveParagraphGap(previousAfter, nextBefore) === Math.max(previousAfter, nextBefore);
+```
+
+The implementation does not rely on browser margin collapsing or Word-style spacing suppression rules.
+
+## DOCX Import Simplification
+
+Mammoth.js provides semantic DOCX-to-HTML conversion. Safe OOXML inspection supplements page settings, paragraph settings, relationships, images, and page breaks.
+
+Supported paragraph settings are normalized into the app's simple `ParagraphFormatting` model where practical:
+
+- Alignment.
+- Indents.
+- Paragraph spacing before and after.
+- Single or multiple line spacing.
+- Exact or at-least line spacing.
+- Page break before.
+- Keep with next and keep lines together.
+
+When Word-specific paragraph spacing or line spacing is simplified, the import records `PARAGRAPH_SPACING_SIMPLIFIED`. Unsupported or lossy settings such as `widowControl`, unsupported alignments, unsupported line rules, section columns, page borders, comments, notes, headers, footers, charts, SmartArt, macros, and external image downloads are recorded as `ImportWarning` entries.
+
+Imported DOCX paragraph settings never change Enter or Shift+Enter behavior. Editing behavior always follows personal preferences.
+
+## DOCX Export Defaults
+
+DOCX export generates a new DOCX from `ExportDocument`; it does not patch the original DOCX.
+
+Paragraphs and headings explicitly emit:
+
+- `spacing.before`
+- `spacing.after`
+- `spacing.line`
+- `spacing.lineRule`
+- `alignment`
+- `indent`
+
+If a paragraph has no local `paragraphFormatting`, export uses `DocumentProject.documentDefaults`. Personal visual settings are not exported unless they were explicitly copied into document defaults when creating a new document.
+
+`hardBreak`, `paragraph`, and `pageBreak` remain distinct during export.

@@ -3,14 +3,7 @@ import type { Editor } from "@tiptap/react";
 import type { ToolbarCommandId } from "../../preferences/toolbar";
 
 export type ToolbarGroupId =
-  | "text"
-  | "heading"
-  | "block"
-  | "alignment"
-  | "list"
-  | "table"
-  | "insert"
-  | "history";
+  "text" | "heading" | "block" | "alignment" | "list" | "table" | "insert" | "history";
 
 export type ToolbarCommandContext = {
   editor: Editor;
@@ -90,17 +83,85 @@ export const TOOLBAR_COMMAND_DEFINITIONS: ToolbarCommandDefinition[] = [
   command("insertTable", "表を挿入", "表", "table", ({ editor }) =>
     editor.chain().focus().insertTable({ rows: 3, cols: 3, withHeaderRow: true }).run(),
   ),
-  command("addRowAfter", "行を追加", "行+", "table", ({ editor }) =>
-    editor.chain().focus().addRowAfter().run(),
+  command(
+    "addRowBefore",
+    "上に行を追加",
+    "行↑",
+    "table",
+    ({ editor }) => editor.chain().focus().addRowBefore().run(),
+    { isEnabled: (editor) => editor.isActive("table") },
   ),
-  command("addColumnAfter", "列を追加", "列+", "table", ({ editor }) =>
-    editor.chain().focus().addColumnAfter().run(),
+  command(
+    "addRowAfter",
+    "下に行を追加",
+    "行↓",
+    "table",
+    ({ editor }) => editor.chain().focus().addRowAfter().run(),
+    { isEnabled: (editor) => editor.isActive("table") },
   ),
-  command("deleteRow", "行を削除", "行-", "table", ({ editor }) =>
-    editor.chain().focus().deleteRow().run(),
+  command(
+    "addColumnBefore",
+    "左に列を追加",
+    "列←",
+    "table",
+    ({ editor }) => editor.chain().focus().addColumnBefore().run(),
+    { isEnabled: (editor) => editor.isActive("table") },
   ),
-  command("deleteColumn", "列を削除", "列-", "table", ({ editor }) =>
-    editor.chain().focus().deleteColumn().run(),
+  command(
+    "addColumnAfter",
+    "右に列を追加",
+    "列→",
+    "table",
+    ({ editor }) => editor.chain().focus().addColumnAfter().run(),
+    { isEnabled: (editor) => editor.isActive("table") },
+  ),
+  command(
+    "deleteRow",
+    "現在の行を削除",
+    "行-",
+    "table",
+    ({ editor }) => editor.chain().focus().deleteRow().run(),
+    { isEnabled: (editor) => editor.isActive("table") },
+  ),
+  command(
+    "deleteColumn",
+    "現在の列を削除",
+    "列-",
+    "table",
+    ({ editor }) => editor.chain().focus().deleteColumn().run(),
+    { isEnabled: (editor) => editor.isActive("table") },
+  ),
+  command(
+    "deleteTable",
+    "表を削除",
+    "表-",
+    "table",
+    ({ editor }) => editor.chain().focus().deleteTable().run(),
+    { isEnabled: (editor) => editor.isActive("table") },
+  ),
+  command(
+    "mergeCells",
+    "選択セルを結合",
+    "結合",
+    "table",
+    ({ editor }) => editor.chain().focus().mergeCells().run(),
+    { isEnabled: (editor) => editor.isActive("table") },
+  ),
+  command(
+    "splitCell",
+    "現在のセルを結合解除",
+    "解除",
+    "table",
+    ({ editor }) => editor.chain().focus().splitCell().run(),
+    { isEnabled: (editor) => editor.isActive("table") },
+  ),
+  command(
+    "toggleHeaderRow",
+    "ヘッダー行を切り替え",
+    "H行",
+    "table",
+    ({ editor }) => editor.chain().focus().toggleHeaderRow().run(),
+    { isEnabled: (editor) => editor.isActive("table") },
   ),
   command("insertImage", "画像を挿入", "画像", "insert", ({ onInsertImage }) => onInsertImage()),
   command("figureCaption", "図題を挿入", "図題", "insert", ({ editor }) =>
@@ -111,6 +172,17 @@ export const TOOLBAR_COMMAND_DEFINITIONS: ToolbarCommandDefinition[] = [
   ),
   command("insertPageBreak", "改ページ", "改頁", "insert", ({ onInsertPageBreak }) =>
     onInsertPageBreak(),
+  ),
+  command(
+    "deletePageBreak",
+    "選択中の改ページを削除",
+    "改頁-",
+    "insert",
+    ({ editor }) => editor.chain().focus().deletePageBreak().run(),
+    {
+      isActive: (editor) => editor.isActive("pageBreak"),
+      isEnabled: (editor) => editor.isActive("pageBreak"),
+    },
   ),
   command("undo", "元に戻す", "戻", "history", ({ editor }) => editor.chain().focus().undo().run()),
   command("redo", "やり直す", "進", "history", ({ editor }) => editor.chain().focus().redo().run()),

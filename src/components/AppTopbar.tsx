@@ -40,6 +40,8 @@ export function AppTopbar({
   onDarkModeChange,
   onImageSelected,
 }: AppTopbarProps) {
+  const forceShowStatus =
+    saveStatus === "error" || saveStatus === "autosave-error" || saveStatus === "recovered";
   return (
     <header className="topbar">
       <input
@@ -48,7 +50,7 @@ export function AppTopbar({
         value={title}
         onChange={(event) => onTitleChange(event.target.value)}
       />
-      {showSaveStatus || saveStatus === "error" ? <SaveStatus status={saveStatus} /> : null}
+      {showSaveStatus || forceShowStatus ? <SaveStatus status={saveStatus} /> : null}
       <span>{characterCount.toLocaleString("ja-JP")} 文字</span>
       <button type="button" onClick={onNewProject}>
         新規

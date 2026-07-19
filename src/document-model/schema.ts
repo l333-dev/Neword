@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const DOCUMENT_FORMAT_VERSION = 3;
+export const DOCUMENT_FORMAT_VERSION = 5;
 
 export const CertaintySchema = z.enum(["certain", "probable", "uncertain"]);
 
@@ -64,40 +64,22 @@ export const LegacyMarginsMmSchema = z.object({
   left: SafeMillimetersSchema,
 });
 
-export const PageSettingsSchema = z
-  .object({
-    size: z.enum(["A4", "Letter", "Custom"]),
-    widthMm: SafePageDimensionMmSchema,
-    heightMm: SafePageDimensionMmSchema,
-    orientation: z.enum(["portrait", "landscape"]),
-    margins: PageMarginsSchema,
-    marginsMm: LegacyMarginsMmSchema,
-    bodyFontFamily: z.string().min(1),
-    bodyFontSizePt: z.number().finite().positive(),
-    lineHeight: z.number().finite().positive(),
-    paragraphSpacingBeforePt: SafePointsSchema,
-    paragraphSpacingAfterPt: SafePointsSchema,
-    header: z.string(),
-    footer: z.string(),
-    pageNumbers: z.boolean(),
-  })
-  .superRefine((settings, context) => {
-    const isLandscape = settings.orientation === "landscape";
-    if (isLandscape && settings.widthMm < settings.heightMm) {
-      context.addIssue({
-        code: "custom",
-        message: "landscape page settings require widthMm >= heightMm",
-        path: ["widthMm"],
-      });
-    }
-    if (!isLandscape && settings.widthMm > settings.heightMm) {
-      context.addIssue({
-        code: "custom",
-        message: "portrait page settings require widthMm <= heightMm",
-        path: ["widthMm"],
-      });
-    }
-  });
+export const PageSettingsSchema = z.object({
+  size: z.enum(["A4", "Letter", "Custom"]),
+  widthMm: SafePageDimensionMmSchema,
+  heightMm: SafePageDimensionMmSchema,
+  orientation: z.enum(["portrait", "landscape"]),
+  margins: PageMarginsSchema,
+  marginsMm: LegacyMarginsMmSchema,
+  bodyFontFamily: z.string().min(1),
+  bodyFontSizePt: z.number().finite().positive(),
+  lineHeight: z.number().finite().positive(),
+  paragraphSpacingBeforePt: SafePointsSchema,
+  paragraphSpacingAfterPt: SafePointsSchema,
+  header: z.string(),
+  footer: z.string(),
+  pageNumbers: z.boolean(),
+});
 
 export const ParagraphAlignmentSchema = z.enum(["left", "center", "right", "justify"]);
 
@@ -130,6 +112,8 @@ export const ParagraphFormattingSchema = z
     }
   });
 
+export const ParagraphSettingsSchema = ParagraphFormattingSchema;
+
 const DocumentDefaultParagraphFormattingSchema = z.object({
   spacingBeforePt: SafePointsSchema,
   spacingAfterPt: SafePointsSchema,
@@ -150,7 +134,12 @@ export const DocumentDefaultsSchema = z.object({
   heading4: DocumentDefaultHeadingFormattingSchema,
 });
 
-export const SupportedImageMimeTypeSchema = z.enum(["image/png", "image/jpeg", "image/gif"]);
+export const SupportedImageMimeTypeSchema = z.enum([
+  "image/png",
+  "image/jpeg",
+  "image/gif",
+  "image/webp",
+]);
 
 const Base64Schema = z.string().regex(/^[A-Za-z0-9+/]*={0,2}$/);
 
@@ -173,9 +162,12 @@ export const AssetSchema = z
     byteSize: z.number().int().nonnegative().optional(),
     widthPx: z.number().int().positive().optional(),
     heightPx: z.number().int().positive().optional(),
+    originalWidthPx: z.number().int().positive().optional(),
+    originalHeightPx: z.number().int().positive().optional(),
     sourcePart: z.string().optional(),
     relationshipId: z.string().optional(),
     checksum: z.string().optional(),
+    importMetadata: z.record(z.string(), z.unknown()).optional(),
   })
   .superRefine((asset, context) => {
     if (asset.kind !== "image") return;
@@ -220,10 +212,34 @@ export const MetadataSchema = z.object({
 
 export const TiptapJsonSchema = z.unknown();
 
+export const HeaderFooterImportMetadataSchema = z.object({
+  source: z.enum(["new", "migrated", "docx_import", "user_edit"]).default("new"),
+  sourcePart: z.string().optional(),
+  relationshipId: z.string().optional(),
+  referenceType: z.enum(["default", "first", "even"]).optional(),
+  importedAt: z.iso.datetime().optional(),
+  warnings: z.array(z.string()).default([]),
+});
+
+export const HeaderContentSchema = z.object({
+  editorContent: TiptapJsonSchema,
+  plainText: z.string(),
+  importMetadata: HeaderFooterImportMetadataSchema,
+});
+
+export const PageNumberPositionSchema = z.enum(["none", "left", "center", "right"]);
+
+export const FooterContentSchema = HeaderContentSchema.extend({
+  pageNumberPosition: PageNumberPositionSchema,
+});
+
 export const DocumentProjectSchema = z.object({
   formatVersion: z.literal(DOCUMENT_FORMAT_VERSION),
   metadata: MetadataSchema,
   pageSettings: PageSettingsSchema,
+  paragraphSettings: ParagraphSettingsSchema,
+  header: HeaderContentSchema,
+  footer: FooterContentSchema,
   documentDefaults: DocumentDefaultsSchema,
   editorContent: TiptapJsonSchema,
   assets: z.array(AssetSchema),
@@ -239,8 +255,13 @@ export type ClassificationResult = z.infer<typeof ClassificationResultSchema>;
 export type BlockType = z.infer<typeof BlockTypeSchema>;
 export type PageSettings = z.infer<typeof PageSettingsSchema>;
 export type ParagraphFormatting = z.infer<typeof ParagraphFormattingSchema>;
+export type ParagraphSettings = z.infer<typeof ParagraphSettingsSchema>;
 export type DocumentDefaults = z.infer<typeof DocumentDefaultsSchema>;
 export type DocumentAsset = z.infer<typeof AssetSchema>;
+export type HeaderFooterImportMetadata = z.infer<typeof HeaderFooterImportMetadataSchema>;
+export type HeaderContent = z.infer<typeof HeaderContentSchema>;
+export type FooterContent = z.infer<typeof FooterContentSchema>;
+export type PageNumberPosition = z.infer<typeof PageNumberPositionSchema>;
 export type DocumentProject = z.infer<typeof DocumentProjectSchema>;
 
 export const defaultPageSettings: PageSettings = {
@@ -298,6 +319,18 @@ export const defaultDocumentDefaults: DocumentDefaults = {
   },
 };
 
+export const defaultParagraphSettings: ParagraphSettings = {
+  indentLeftMm: 0,
+  indentRightMm: 0,
+  firstLineIndentMm: 0,
+  spaceBeforePt: defaultDocumentDefaults.bodyParagraph.spacingBeforePt,
+  spaceAfterPt: defaultDocumentDefaults.bodyParagraph.spacingAfterPt,
+  lineSpacing: {
+    type: "multiple",
+    value: defaultDocumentDefaults.bodyParagraph.lineHeight,
+  },
+};
+
 export const emptyTiptapDocument = {
   type: "doc",
   content: [
@@ -313,6 +346,30 @@ export const emptyTiptapDocument = {
   ],
 };
 
+export const emptyHeaderFooterDocument = {
+  type: "doc",
+  content: [{ type: "paragraph" }],
+};
+
+export const defaultHeader: HeaderContent = {
+  editorContent: emptyHeaderFooterDocument,
+  plainText: "",
+  importMetadata: {
+    source: "new",
+    warnings: [],
+  },
+};
+
+export const defaultFooter: FooterContent = {
+  editorContent: emptyHeaderFooterDocument,
+  plainText: "",
+  importMetadata: {
+    source: "new",
+    warnings: [],
+  },
+  pageNumberPosition: "none",
+};
+
 export function createNewProject(now = new Date()): DocumentProject {
   const iso = now.toISOString();
   return {
@@ -321,6 +378,9 @@ export function createNewProject(now = new Date()): DocumentProject {
       title: "無題の文書",
     },
     pageSettings: defaultPageSettings,
+    paragraphSettings: defaultParagraphSettings,
+    header: defaultHeader,
+    footer: defaultFooter,
     documentDefaults: defaultDocumentDefaults,
     editorContent: emptyTiptapDocument,
     assets: [],

@@ -14,6 +14,32 @@ import {
 } from "../../stores/editingPreferences";
 import { PageBreak } from "./page-break";
 
+const HexColorPattern = /^#[0-9A-Fa-f]{6}$/;
+const VerticalAlignValues = new Set(["top", "middle", "bottom"]);
+const ImageAlignmentValues = new Set(["left", "center", "right"]);
+
+function parsePositivePixel(value: string | null): number | null {
+  if (!value) return null;
+  const parsed = Number(value.replace(/px$/i, ""));
+  if (!Number.isFinite(parsed) || parsed <= 0 || parsed > 8000) return null;
+  return Math.round(parsed);
+}
+
+function renderImageStyle(attributes: Record<string, unknown>): string | undefined {
+  const declarations: string[] = [];
+  if (typeof attributes.widthPx === "number") declarations.push(`width: ${attributes.widthPx}px`);
+  if (typeof attributes.heightPx === "number")
+    declarations.push(`height: ${attributes.heightPx}px`);
+  if (attributes.alignment === "center") {
+    declarations.push("display: block", "margin-left: auto", "margin-right: auto");
+  } else if (attributes.alignment === "right") {
+    declarations.push("display: block", "margin-left: auto");
+  } else if (attributes.alignment === "left") {
+    declarations.push("display: block", "margin-right: auto");
+  }
+  return declarations.length > 0 ? declarations.join("; ") : undefined;
+}
+
 function parseParagraphFormatting(value: string | null): ParagraphFormatting | null {
   if (!value) return null;
   try {
@@ -99,6 +125,161 @@ const AssetImage = Image.extend({
             ? { height: attributes.height }
             : {},
       },
+      widthPx: {
+        default: null,
+        parseHTML: (element) =>
+          parsePositivePixel(
+            element.getAttribute("data-width-px") ?? element.getAttribute("width"),
+          ),
+        renderHTML: () => ({}),
+      },
+      heightPx: {
+        default: null,
+        parseHTML: (element) =>
+          parsePositivePixel(
+            element.getAttribute("data-height-px") ?? element.getAttribute("height"),
+          ),
+        renderHTML: () => ({}),
+      },
+      keepAspectRatio: {
+        default: true,
+        parseHTML: (element) => element.getAttribute("data-keep-aspect-ratio") !== "false",
+        renderHTML: (attributes) => ({
+          "data-keep-aspect-ratio": attributes.keepAspectRatio === false ? "false" : "true",
+        }),
+      },
+      alignment: {
+        default: "left",
+        parseHTML: (element) => {
+          const value =
+            element.getAttribute("data-image-alignment") ?? element.style.textAlign ?? "left";
+          return ImageAlignmentValues.has(value) ? value : "left";
+        },
+        renderHTML: (attributes) =>
+          typeof attributes.alignment === "string" && ImageAlignmentValues.has(attributes.alignment)
+            ? { "data-image-alignment": attributes.alignment }
+            : {},
+      },
+      altText: {
+        default: "",
+        parseHTML: (element) =>
+          element.getAttribute("data-alt-text") ?? element.getAttribute("alt"),
+        renderHTML: (attributes) =>
+          typeof attributes.altText === "string"
+            ? { "data-alt-text": attributes.altText, alt: attributes.altText }
+            : {},
+      },
+    };
+  },
+  renderHTML({ HTMLAttributes }) {
+    const style = renderImageStyle(HTMLAttributes);
+    return [
+      "img",
+      {
+        ...HTMLAttributes,
+        ...(typeof HTMLAttributes.widthPx === "number" ? { width: HTMLAttributes.widthPx } : {}),
+        ...(typeof HTMLAttributes.heightPx === "number" ? { height: HTMLAttributes.heightPx } : {}),
+        ...(typeof HTMLAttributes.widthPx === "number"
+          ? { "data-width-px": String(HTMLAttributes.widthPx) }
+          : {}),
+        ...(typeof HTMLAttributes.heightPx === "number"
+          ? { "data-height-px": String(HTMLAttributes.heightPx) }
+          : {}),
+        ...(style ? { style } : {}),
+      },
+    ];
+  },
+});
+
+function parseHexColor(value: string | null): string | null {
+  if (!value) return null;
+  const trimmed = value.trim();
+  if (HexColorPattern.test(trimmed)) return trimmed.toUpperCase();
+  const rgbMatch = trimmed.match(/^rgb\((\d{1,3}),\s*(\d{1,3}),\s*(\d{1,3})\)$/i);
+  if (!rgbMatch) return null;
+  const channels = rgbMatch.slice(1).map((channel) => Number(channel));
+  if (channels.some((channel) => !Number.isInteger(channel) || channel < 0 || channel > 255)) {
+    return null;
+  }
+  return `#${channels.map((channel) => channel.toString(16).padStart(2, "0")).join("")}`.toUpperCase();
+}
+
+function parseVerticalAlign(value: string | null): "top" | "middle" | "bottom" | null {
+  if (!value) return null;
+  const normalized = value.trim().toLowerCase();
+  return VerticalAlignValues.has(normalized) ? (normalized as "top" | "middle" | "bottom") : null;
+}
+
+const TableWithLayout = Table.extend({
+  addAttributes() {
+    return {
+      ...this.parent?.(),
+      tableWidthPx: {
+        default: null,
+        parseHTML: (element) => {
+          const dataWidth = element.getAttribute("data-table-width-px");
+          const parsed = dataWidth === null ? Number.NaN : Number(dataWidth);
+          return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+        },
+        renderHTML: (attributes) =>
+          typeof attributes.tableWidthPx === "number" && Number.isFinite(attributes.tableWidthPx)
+            ? {
+                "data-table-width-px": String(attributes.tableWidthPx),
+                style: `width: ${attributes.tableWidthPx}px`,
+              }
+            : {},
+      },
+    };
+  },
+});
+
+const tableCellFormattingAttributes = {
+  backgroundColor: {
+    default: null,
+    parseHTML: (element: HTMLElement) =>
+      parseHexColor(
+        element.getAttribute("data-cell-background") || element.style.backgroundColor || null,
+      ),
+    renderHTML: (attributes: Record<string, unknown>) =>
+      typeof attributes.backgroundColor === "string" &&
+      HexColorPattern.test(attributes.backgroundColor)
+        ? {
+            "data-cell-background": attributes.backgroundColor,
+            style: `background-color: ${attributes.backgroundColor}`,
+          }
+        : {},
+  },
+  verticalAlign: {
+    default: null,
+    parseHTML: (element: HTMLElement) =>
+      parseVerticalAlign(
+        element.getAttribute("data-cell-vertical-align") || element.style.verticalAlign || null,
+      ),
+    renderHTML: (attributes: Record<string, unknown>) =>
+      typeof attributes.verticalAlign === "string" &&
+      VerticalAlignValues.has(attributes.verticalAlign)
+        ? {
+            "data-cell-vertical-align": attributes.verticalAlign,
+            style: `vertical-align: ${attributes.verticalAlign}`,
+          }
+        : {},
+  },
+};
+
+const TableCellWithFormatting = TableCell.extend({
+  addAttributes() {
+    return {
+      ...this.parent?.(),
+      ...tableCellFormattingAttributes,
+    };
+  },
+});
+
+const TableHeaderWithFormatting = TableHeader.extend({
+  addAttributes() {
+    return {
+      ...this.parent?.(),
+      ...tableCellFormattingAttributes,
     };
   },
 });
@@ -144,10 +325,10 @@ export function createEditorExtensions(
     }),
     SimpleLineBreakBehavior.configure({ getPreferences }),
     ParagraphFormatting,
-    Table.configure({ resizable: true }),
+    TableWithLayout.configure({ resizable: true }),
     TableRow,
-    TableHeader,
-    TableCell,
+    TableHeaderWithFormatting,
+    TableCellWithFormatting,
     AssetImage.configure({ allowBase64: true }),
     PageBreak,
   ];

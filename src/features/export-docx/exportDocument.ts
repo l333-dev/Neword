@@ -3,8 +3,11 @@ import {
   type DocumentAsset,
   type DocumentDefaults,
   type DocumentProject,
+  type FooterContent,
+  type HeaderContent,
   type PageSettings,
   type ParagraphFormatting,
+  type ParagraphSettings,
 } from "../../document-model/schema";
 
 export type ExportInline =
@@ -17,6 +20,16 @@ export type ExportInline =
       strike?: boolean;
     }
   | { type: "hard_break" };
+
+export type ExportTableCell = {
+  header: boolean;
+  colspan: number;
+  rowspan: number;
+  colwidth: number[];
+  backgroundColor?: string;
+  verticalAlign?: "top" | "middle" | "bottom";
+  paragraphs: ExportInline[][];
+};
 
 export type ExportBlock =
   | {
@@ -34,14 +47,30 @@ export type ExportBlock =
     }
   | { type: "bullet_list"; items: ExportInline[][] }
   | { type: "ordered_list"; items: ExportInline[][] }
-  | { type: "table"; rows: ExportInline[][][] }
-  | { type: "image"; assetId: string; altText: string; widthPx?: number; heightPx?: number }
+  | { type: "table"; tableWidthPx?: number; rows: ExportTableCell[][] }
+  | {
+      type: "image";
+      assetId: string;
+      altText: string;
+      widthPx?: number;
+      heightPx?: number;
+      alignment: "left" | "center" | "right";
+    }
   | { type: "caption"; kind: "figure" | "table"; content: ExportInline[] }
-  | { type: "page_break" };
+  | {
+      type: "page_break";
+      breakType: "page" | "sectionNextPage" | "sectionContinuous";
+      source?: string;
+      importedFrom?: string;
+      sectionMetadata?: unknown;
+    };
 
 export type ExportDocument = {
   title: string;
   pageSettings: PageSettings;
+  paragraphSettings: ParagraphSettings;
+  header: HeaderContent;
+  footer: FooterContent;
   documentDefaults: DocumentDefaults;
   assets: DocumentAsset[];
   blocks: ExportBlock[];
@@ -98,6 +127,38 @@ function paragraphFormattingFromAttrs(
   return parsed.success ? parsed.data : undefined;
 }
 
+function tableCellFromNode(node: TiptapNode): ExportTableCell {
+  const attrs = node.attrs ?? {};
+  const colspan = positiveIntegerAttr(attrs.colspan) ?? 1;
+  const rowspan = positiveIntegerAttr(attrs.rowspan) ?? 1;
+  const colwidth = Array.isArray(attrs.colwidth)
+    ? attrs.colwidth
+        .map((value) => numericAttr(value))
+        .filter((value): value is number => value !== undefined && value > 0)
+    : [];
+  const paragraphs =
+    node.content
+      ?.filter((child) => child.type === "paragraph" || child.type === "heading")
+      .map((child) => inlineFromNodes(child.content)) ?? [];
+  return {
+    header: node.type === "tableHeader",
+    colspan,
+    rowspan,
+    colwidth,
+    backgroundColor:
+      typeof attrs.backgroundColor === "string" && /^#[0-9A-Fa-f]{6}$/.test(attrs.backgroundColor)
+        ? attrs.backgroundColor.toUpperCase()
+        : undefined,
+    verticalAlign:
+      attrs.verticalAlign === "middle" ||
+      attrs.verticalAlign === "bottom" ||
+      attrs.verticalAlign === "top"
+        ? attrs.verticalAlign
+        : undefined,
+    paragraphs: paragraphs.length > 0 ? paragraphs : [[]],
+  };
+}
+
 export function projectToExportDocument(project: DocumentProject): ExportDocument {
   const doc = project.editorContent as TiptapNode;
   const blocks: ExportBlock[] = [];
@@ -133,13 +194,8 @@ export function projectToExportDocument(project: DocumentProject): ExportDocumen
     }
     if (node.type === "table") {
       const rows =
-        node.content?.map(
-          (row) =>
-            row.content?.map((cell) =>
-              inlineFromNodes(cell.content?.flatMap((child) => child.content ?? [])),
-            ) ?? [],
-        ) ?? [];
-      blocks.push({ type: "table", rows });
+        node.content?.map((row) => row.content?.map((cell) => tableCellFromNode(cell)) ?? []) ?? [];
+      blocks.push({ type: "table", tableWidthPx: numericAttr(node.attrs?.tableWidthPx), rows });
       continue;
     }
     if (node.type === "image") {
@@ -151,22 +207,54 @@ export function projectToExportDocument(project: DocumentProject): ExportDocumen
             : typeof node.attrs?.src === "string"
               ? node.attrs.src
               : "",
-        altText: typeof node.attrs?.alt === "string" ? node.attrs.alt : "",
-        widthPx: numericAttr(node.attrs?.width),
-        heightPx: numericAttr(node.attrs?.height),
+        altText:
+          typeof node.attrs?.altText === "string"
+            ? node.attrs.altText
+            : typeof node.attrs?.alt === "string"
+              ? node.attrs.alt
+              : "",
+        widthPx: numericAttr(node.attrs?.widthPx) ?? numericAttr(node.attrs?.width),
+        heightPx: numericAttr(node.attrs?.heightPx) ?? numericAttr(node.attrs?.height),
+        alignment:
+          node.attrs?.alignment === "center" || node.attrs?.alignment === "right"
+            ? node.attrs.alignment
+            : "left",
       });
       continue;
     }
-    if (node.type === "pageBreak") blocks.push({ type: "page_break" });
+    if (node.type === "pageBreak") {
+      blocks.push({
+        type: "page_break",
+        breakType:
+          node.attrs?.breakType === "sectionNextPage" ||
+          node.attrs?.breakType === "sectionContinuous"
+            ? node.attrs.breakType
+            : "page",
+        source: typeof node.attrs?.source === "string" ? node.attrs.source : undefined,
+        importedFrom:
+          typeof node.attrs?.importedFrom === "string" ? node.attrs.importedFrom : undefined,
+        sectionMetadata: node.attrs?.sectionMetadata,
+      });
+    }
   }
 
   return {
     title: project.metadata.title,
     pageSettings: project.pageSettings,
+    paragraphSettings: project.paragraphSettings,
+    header: project.header,
+    footer: project.footer,
     documentDefaults: project.documentDefaults,
     assets: project.assets,
     blocks,
   };
+}
+
+function positiveIntegerAttr(value: unknown): number | undefined {
+  const parsed = numericAttr(value);
+  if (parsed === undefined) return undefined;
+  const integer = Math.round(parsed);
+  return integer > 0 ? integer : undefined;
 }
 
 function numericAttr(value: unknown): number | undefined {

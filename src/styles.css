@@ -100,14 +100,60 @@ textarea:focus-visible {
 }
 
 .status-dirty,
-.status-error {
+.status-error,
+.status-autosave-error,
+.status-recovered {
   background: #fee2e2;
   color: #991b1b;
 }
 
-.status-saving {
+.status-saving,
+.status-autosaving,
+.status-autosave-pending {
   background: #fef3c7;
   color: #92400e;
+}
+
+.status-autosaved {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.recovery-panel {
+  border-bottom: 1px solid var(--border-color);
+  background: #fff7ed;
+  padding: 16px 24px;
+}
+
+.recovery-panel h2 {
+  margin: 0 0 8px;
+  font-size: 1rem;
+}
+
+.recovery-list {
+  display: grid;
+  gap: 12px;
+}
+
+.recovery-candidate {
+  border: 1px solid #fed7aa;
+  border-radius: 8px;
+  background: #fff;
+  padding: 12px;
+}
+
+.recovery-invalid {
+  opacity: 0.75;
+}
+
+.save-timestamps {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  border-bottom: 1px solid var(--border-color);
+  padding: 6px 24px;
+  color: var(--muted-color);
+  font-size: 0.85rem;
 }
 
 .workspace {
@@ -194,6 +240,23 @@ textarea:focus-visible {
   margin: 12px 0 20px;
 }
 
+.header-footer-editor-frame {
+  min-height: 72px;
+  padding: 8px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: var(--panel-bg);
+}
+
+.header-footer-editor {
+  min-height: 56px;
+  outline: none;
+}
+
+.header-footer-editor p {
+  margin: 0 0 6px;
+}
+
 .toggle {
   grid-template-columns: auto 1fr;
   align-items: center;
@@ -268,16 +331,78 @@ textarea:focus-visible {
   overflow-x: visible;
 }
 
+.editor-page-frame {
+  box-sizing: border-box;
+  width: min(var(--page-width), 100%);
+  min-width: min(var(--page-width), 100%);
+  max-width: var(--page-width);
+  min-height: var(--page-min-height);
+  margin: 12px auto 0;
+  padding: var(--page-margin-top) var(--page-margin-right) var(--page-margin-bottom)
+    var(--page-margin-left);
+  background: var(--editor-bg);
+  color: #15191e;
+  border: 1px solid rgb(0 0 0 / 12%);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 18%);
+}
+
+.editor-page-frame[data-orientation="landscape"] {
+  box-shadow: 0 8px 24px rgb(0 0 0 / 16%);
+}
+
+.page-header-preview,
+.page-footer-preview {
+  min-height: 28px;
+  color: #5f6670;
+  font-size: 12px;
+  line-height: 1.4;
+  white-space: pre-wrap;
+}
+
+.page-header-preview {
+  margin-bottom: 12px;
+  border-bottom: 1px solid rgb(0 0 0 / 8%);
+}
+
+.page-footer-preview {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-top: 18px;
+  padding-top: 8px;
+  border-top: 1px solid rgb(0 0 0 / 8%);
+}
+
+.page-number-left {
+  justify-content: flex-start;
+}
+
+.page-number-center {
+  justify-content: center;
+}
+
+.page-number-right {
+  justify-content: flex-end;
+}
+
+.page-number-none {
+  justify-content: flex-start;
+}
+
+.page-number-preview {
+  font-variant-numeric: tabular-nums;
+}
+
 .editor-canvas {
   box-sizing: border-box;
   width: 100%;
-  max-width: var(--editor-max-width);
-  min-height: 1120px;
-  margin: 12px auto 0;
-  padding: 72px;
-  background: var(--editor-bg);
+  min-height: calc(
+    var(--page-min-height) - var(--page-margin-top) - var(--page-margin-bottom) - 84px
+  );
+  margin: 0;
+  padding: 0;
+  background: transparent;
   color: #15191e;
-  box-shadow: 0 8px 24px rgb(0 0 0 / 18%);
   outline: none;
   display: flow-root;
   line-height: var(--editor-line-height);
@@ -351,23 +476,43 @@ textarea:focus-visible {
 
 .editor-canvas img {
   max-width: 100%;
+  height: auto;
+}
+
+.editor-canvas img.ProseMirror-selectednode {
+  outline: 2px solid var(--accent-color);
+  outline-offset: 3px;
+}
+
+.button-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 .page-break {
-  height: 1px;
+  position: relative;
+  height: 28px;
   margin: 32px 0;
-  border-top: 2px dashed var(--text-secondary);
+  border-top: 2px dashed #8d96a3;
+  break-after: page;
 }
 
 .show-page-break-marks .page-break::after {
-  content: "改ページ";
+  content: attr(data-break-type);
   display: block;
   width: max-content;
   margin: -12px auto 0;
   padding: 0 6px;
   background: var(--editor-bg);
-  color: var(--text-secondary);
+  color: #667085;
   font-size: 12px;
+}
+
+.page-break.ProseMirror-selectednode {
+  border-top-color: var(--accent-color);
+  outline: 2px solid var(--accent-color);
+  outline-offset: 6px;
 }
 
 .muted {

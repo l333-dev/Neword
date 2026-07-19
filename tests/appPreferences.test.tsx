@@ -33,6 +33,20 @@ describe("App appearance preferences", () => {
     );
   });
 
+  it("renders the editor inside a page frame that reflects page settings", () => {
+    const rendered = render(<App />);
+    const pageFrame = screen.getByLabelText("ページ表示");
+
+    expect(pageFrame.getAttribute("data-orientation")).toBe("portrait");
+    expect(pageFrame.style.getPropertyValue("--page-width")).toBe("672px");
+    expect(pageFrame.style.getPropertyValue("--page-min-height")).toBe("950px");
+
+    fireEvent.change(screen.getByLabelText("向き"), { target: { value: "landscape" } });
+
+    expect(pageFrame.getAttribute("data-orientation")).toBe("landscape");
+    expect(rendered.container.querySelector(".editor-canvas")).toBeTruthy();
+  });
+
   it("hides and reopens settings from the fixed topbar button without making the document dirty", async () => {
     render(<App />);
 

@@ -4,18 +4,28 @@ import mammoth from "mammoth/mammoth.browser";
 import { classifyBlock, type ClassificationInput } from "../../classification/rules";
 import {
   defaultPageSettings,
+  defaultFooter,
+  defaultHeader,
+  defaultParagraphSettings,
+  emptyHeaderFooterDocument,
   ParagraphFormattingSchema,
   type ClassificationResult,
   type DocumentAsset,
+  type FooterContent,
+  type HeaderContent,
   type ImportWarning,
   type PageSettings,
   type ParagraphFormatting,
+  type ParagraphSettings,
 } from "../../document-model/schema";
 import { twipsToMillimeters, twipsToPoints } from "../../converters/units";
 import type {
+  DocxHeaderFooter,
   DocxImageRelationship,
   DocxInspection,
+  DocxPageSettings,
   DocxParagraphFormatting,
+  DocxSection,
 } from "../../project/fileAccess";
 
 const ALLOWED_TAGS = [
@@ -51,9 +61,23 @@ const ALLOWED_ATTR = [
   "href",
   "colspan",
   "rowspan",
+  "colwidth",
   "data-paragraph-formatting",
   "data-page-break",
+  "data-break-type",
+  "data-source",
+  "data-imported-from",
+  "data-section-metadata",
   "data-asset-id",
+  "data-width-px",
+  "data-height-px",
+  "data-alt-text",
+  "data-image-alignment",
+  "data-keep-aspect-ratio",
+  "data-cell-background",
+  "data-cell-vertical-align",
+  "data-table-width-px",
+  "data-unsupported-table",
 ];
 
 export type SourceFileInfo = {
@@ -92,6 +116,9 @@ export type ImportResult = {
   document: ImportDocument;
   assets: DocumentAsset[];
   pageSettings: PageSettings;
+  paragraphSettings: ParagraphSettings;
+  header: HeaderContent;
+  footer: FooterContent;
   warnings: ImportWarning[];
   sourceInfo: SourceFileInfo;
 };
@@ -115,13 +142,68 @@ function warning(
 }
 
 export function sanitizeImportHtml(html: string): string {
-  const sanitized = DOMPurify.sanitize(html, {
+  const sanitized = DOMPurify.sanitize(normalizeTableHtml(html), {
     ALLOWED_TAGS,
     ALLOWED_ATTR,
     FORBID_ATTR: ["style"],
     ALLOW_DATA_ATTR: true,
   });
   return removeExternalImageSources(sanitized);
+}
+
+function normalizeTableHtml(html: string): string {
+  const document = new DOMParser().parseFromString(html, "text/html");
+  for (const table of Array.from(document.querySelectorAll("table"))) {
+    const width = positiveNumberFromCss(table.getAttribute("width") ?? table.style.width);
+    if (width !== null) table.setAttribute("data-table-width-px", String(width));
+    if (table.querySelector("table")) {
+      table.setAttribute("data-unsupported-table", "nested");
+    }
+  }
+  for (const cell of Array.from(document.querySelectorAll("td, th"))) {
+    const cellElement = cell as HTMLElement;
+    const background = normalizeCssColor(
+      cellElement.getAttribute("bgcolor") || cellElement.style.backgroundColor || null,
+    );
+    if (background) cell.setAttribute("data-cell-background", background);
+    const verticalAlign = normalizeVerticalAlign(
+      cellElement.getAttribute("valign") || cellElement.style.verticalAlign || null,
+    );
+    if (verticalAlign) cell.setAttribute("data-cell-vertical-align", verticalAlign);
+    const width = positiveNumberFromCss(
+      cellElement.getAttribute("width") ?? cellElement.style.width,
+    );
+    if (width !== null) cell.setAttribute("colwidth", String(width));
+  }
+  return document.body.innerHTML;
+}
+
+function normalizeCssColor(value: string | null): string | null {
+  if (!value) return null;
+  const trimmed = value.trim();
+  if (/^#[0-9A-Fa-f]{6}$/.test(trimmed)) return trimmed.toUpperCase();
+  const rgbMatch = trimmed.match(/^rgb\((\d{1,3}),\s*(\d{1,3}),\s*(\d{1,3})\)$/i);
+  if (!rgbMatch) return null;
+  const channels = rgbMatch.slice(1).map((channel) => Number(channel));
+  if (channels.some((channel) => !Number.isInteger(channel) || channel < 0 || channel > 255)) {
+    return null;
+  }
+  return `#${channels.map((channel) => channel.toString(16).padStart(2, "0")).join("")}`.toUpperCase();
+}
+
+function normalizeVerticalAlign(value: string | null): "top" | "middle" | "bottom" | null {
+  if (!value) return null;
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "center") return "middle";
+  if (normalized === "top" || normalized === "middle" || normalized === "bottom") return normalized;
+  return null;
+}
+
+function positiveNumberFromCss(value: string | null): number | null {
+  if (!value) return null;
+  const parsed = Number.parseFloat(value);
+  if (!Number.isFinite(parsed) || parsed <= 0 || parsed > 10000) return null;
+  return Math.round(parsed);
 }
 
 export async function convertDocxFileToImportResult(file: File): Promise<ImportResult> {
@@ -160,11 +242,13 @@ export async function convertDocxArrayBufferToImportResult({
   const htmlWarnings = warningsFromHtml(result.value);
   const imageImport = imageAssetsFromInspection(inspection);
   const pageImport = pageSettingsFromInspection(inspection);
+  const headerFooterImport = headerFooterFromInspection(inspection, sourceInfo.inspectedAt);
   const formattingImport = paragraphFormattingFromInspection(inspection);
   const sanitizedHtml = applyOoxmlFormattingToHtml(
     attachImageAssetsToHtml(sanitizeImportHtml(result.value), imageImport.assets),
     formattingImport.formatting,
     inspection?.paragraphs ?? [],
+    inspection?.sections ?? [],
   );
   const document = importDocumentFromHtml(sanitizedHtml);
   document.stats.retainedImageCount = imageImport.assets.length;
@@ -173,6 +257,7 @@ export async function convertDocxArrayBufferToImportResult({
   const warnings: ImportWarning[] = [
     ...warningsFromInspection(inspection),
     ...pageImport.warnings,
+    ...headerFooterImport.warnings,
     ...formattingImport.warnings,
     ...imageImport.warnings,
     ...result.messages.map((message, index) =>
@@ -196,9 +281,141 @@ export async function convertDocxArrayBufferToImportResult({
     document,
     assets: imageImport.assets,
     pageSettings: pageImport.pageSettings,
+    paragraphSettings: firstParagraphSettings(formattingImport.formatting),
+    header: headerFooterImport.header,
+    footer: headerFooterImport.footer,
     warnings,
     sourceInfo,
   };
+}
+
+function headerFooterFromInspection(
+  inspection: DocxInspection | undefined,
+  importedAt: string,
+): {
+  header: HeaderContent;
+  footer: FooterContent;
+  warnings: ImportWarning[];
+} {
+  const warnings: ImportWarning[] = [];
+  const header = contentFromHeaderFooter(
+    "header",
+    inspection?.headers ?? [],
+    defaultHeader,
+    importedAt,
+    warnings,
+  );
+  const footerBase = contentFromHeaderFooter(
+    "footer",
+    inspection?.footers ?? [],
+    defaultFooter,
+    importedAt,
+    warnings,
+  );
+  const footer: FooterContent = {
+    ...footerBase,
+    pageNumberPosition: (inspection?.footers ?? []).some((item) => item.has_page_number)
+      ? "center"
+      : "none",
+  };
+  return { header, footer, warnings };
+}
+
+function contentFromHeaderFooter<T extends HeaderContent>(
+  kind: "header" | "footer",
+  items: DocxHeaderFooter[],
+  fallback: T,
+  importedAt: string,
+  warnings: ImportWarning[],
+): T {
+  if (items.length === 0) return fallback;
+  const defaultItem = items.find((item) => item.reference_type === "default") ?? items[0];
+  if (!defaultItem) return fallback;
+  const distinctTypes = new Set(items.map((item) => item.reference_type));
+  if (items.length > 1 || distinctTypes.size > 1) {
+    warnings.push(
+      warning(
+        kind === "header" ? "header.multiple_types" : "footer.multiple_types",
+        kind === "header"
+          ? "複数種類のヘッダーを検出しました。標準ヘッダーのみ取り込みます。"
+          : "複数種類のフッターを検出しました。標準フッターのみ取り込みます。",
+        "warning",
+        "word/document.xml",
+      ),
+    );
+  }
+  for (const item of items) {
+    if (item.reference_type === "first") {
+      warnings.push(
+        warning(
+          kind === "header" ? "header.first_page_unsupported" : "footer.first_page_unsupported",
+          kind === "header"
+            ? "First Page Headerは標準ヘッダーへ統合できないため保持しません。"
+            : "First Page Footerは標準フッターへ統合できないため保持しません。",
+          "warning",
+          item.source_part ?? "word/document.xml",
+        ),
+      );
+    }
+    if (item.reference_type === "even") {
+      warnings.push(
+        warning(
+          kind === "header" ? "header.even_odd_unsupported" : "footer.even_odd_unsupported",
+          kind === "header"
+            ? "奇数偶数ページ別Headerは標準ヘッダーへ統合できないため保持しません。"
+            : "奇数偶数ページ別Footerは標準フッターへ統合できないため保持しません。",
+          "warning",
+          item.source_part ?? "word/document.xml",
+        ),
+      );
+    }
+    for (const feature of item.unsupported_features) {
+      warnings.push(
+        warning(
+          kind === "header" ? "header.word_feature_unsupported" : "footer.word_feature_unsupported",
+          kind === "header"
+            ? "Word固有のヘッダー機能を単純なテキストへ変換しました。"
+            : "Word固有のフッター機能を単純なテキストへ変換しました。",
+          "warning",
+          item.source_part ?? "word/document.xml",
+          { originalValue: feature },
+        ),
+      );
+    }
+  }
+  return {
+    ...fallback,
+    editorContent: plainTextToTiptapDocument(defaultItem.text),
+    plainText: defaultItem.text,
+    importMetadata: {
+      source: "docx_import",
+      sourcePart: defaultItem.source_part ?? undefined,
+      relationshipId: defaultItem.relationship_id ?? undefined,
+      referenceType:
+        defaultItem.reference_type === "first" || defaultItem.reference_type === "even"
+          ? defaultItem.reference_type
+          : "default",
+      importedAt,
+      warnings: defaultItem.unsupported_features,
+    },
+  };
+}
+
+function plainTextToTiptapDocument(plainText: string): unknown {
+  if (plainText.length === 0) return emptyHeaderFooterDocument;
+  return {
+    type: "doc",
+    content: [
+      {
+        type: "paragraph",
+        content: [{ type: "text", text: plainText }],
+      },
+    ],
+  };
+}
+
+function firstParagraphSettings(formatting: Map<number, ParagraphFormatting>): ParagraphSettings {
+  return formatting.values().next().value ?? defaultParagraphSettings;
 }
 
 export function importDocumentFromHtml(html: string): ImportDocument {
@@ -306,21 +523,21 @@ function warningsFromInspection(inspection: DocxInspection | undefined): ImportW
       ),
     );
   }
-  if (inspection.has_headers) {
+  if (inspection.has_headers && inspection.headers.length === 0) {
     warnings.push(
       warning(
-        "docx.unsupported_headers",
-        "ヘッダーは検出しましたが、本文には変換しません。",
-        "warning",
+        "header.unreferenced_part",
+        "ヘッダーpartを検出しましたが、本文セクションから参照されていません。",
+        "info",
       ),
     );
   }
-  if (inspection.has_footers) {
+  if (inspection.has_footers && inspection.footers.length === 0) {
     warnings.push(
       warning(
-        "docx.unsupported_footers",
-        "フッターは検出しましたが、本文には変換しません。",
-        "warning",
+        "footer.unreferenced_part",
+        "フッターpartを検出しましたが、本文セクションから参照されていません。",
+        "info",
       ),
     );
   }
@@ -375,6 +592,36 @@ function warningsFromInspection(inspection: DocxInspection | undefined): ImportW
       );
     }
   }
+  for (const imageWarning of inspection.image_warnings ?? []) {
+    warnings.push(
+      warning(
+        imageWarning.code,
+        imageWarning.message,
+        imageWarning.severity,
+        imageWarning.relationship_id
+          ? `relationship:${imageWarning.relationship_id}`
+          : `image:${imageWarning.position ?? "?"}`,
+        {
+          part: imageWarning.part ?? undefined,
+          originalValue: imageWarning.relationship_id ?? imageWarning.position,
+          fallbackValue: imageWarning.simplified,
+        },
+      ),
+    );
+  }
+  for (const tableWarning of inspection.table_warnings ?? []) {
+    warnings.push(
+      warning(
+        tableWarning.code,
+        tableWarning.message,
+        tableWarning.severity,
+        tableWarning.cell_index === null || tableWarning.cell_index === undefined
+          ? `table:${tableWarning.table_index}`
+          : `table:${tableWarning.table_index} row:${tableWarning.row_index ?? "?"} cell:${tableWarning.cell_index}`,
+        { fallbackValue: tableWarning.simplified },
+      ),
+    );
+  }
   if (inspection.sections.length > 1) {
     warnings.push(
       warning(
@@ -391,6 +638,30 @@ function warningsFromInspection(inspection: DocxInspection | undefined): ImportW
     );
   }
   for (const section of inspection.sections) {
+    const sectionCode =
+      section.break_type === "continuous"
+        ? "section.continuous_unsupported"
+        : section.break_type === "oddPage"
+          ? "section.odd_page_unsupported"
+          : section.break_type === "evenPage"
+            ? "section.even_page_unsupported"
+            : null;
+    if (section.index > 0 && sectionCode) {
+      warnings.push(
+        warning(
+          sectionCode,
+          "セクション区切りを検出しました。編集上は区切り位置と種類だけを保持します。",
+          "warning",
+          "word/document.xml",
+          {
+            part: "word/document.xml",
+            paragraphIndex: section.paragraph_index ?? undefined,
+            originalValue: section.break_type,
+            fallbackValue: "pageBreak.sectionMetadata",
+          },
+        ),
+      );
+    }
     if (
       section.index > 0 &&
       section.break_type &&
@@ -449,6 +720,99 @@ function warningsFromInspection(inspection: DocxInspection | undefined): ImportW
           {
             part: "word/document.xml",
             paragraphIndex: section.paragraph_index ?? undefined,
+          },
+        ),
+      );
+    }
+    if (
+      section.index > 0 &&
+      ((section.header_references?.length ?? 0) > 0 || (section.footer_references?.length ?? 0) > 0)
+    ) {
+      warnings.push(
+        warning(
+          "section.header_footer_simplified",
+          "セクションごとのヘッダー/フッター参照は検出のみ行い、標準ヘッダー/フッターへ単純化します。",
+          "warning",
+          "word/document.xml",
+          {
+            part: "word/document.xml",
+            paragraphIndex: section.paragraph_index ?? undefined,
+            originalValue: {
+              headers: section.header_references,
+              footers: section.footer_references,
+            },
+            fallbackValue: "default_header_footer",
+          },
+        ),
+      );
+    }
+  }
+  for (const paragraph of inspection.paragraphs) {
+    if (paragraph.has_rendered_page_break) {
+      warnings.push(
+        warning(
+          "page_break.rendered_only",
+          "Wordの表示結果由来の改ページを検出しました。明示的な改ページとしては取り込みません。",
+          "info",
+          `paragraph:${paragraph.index}`,
+          {
+            part: "word/document.xml",
+            paragraphIndex: paragraph.index,
+            originalValue: "w:lastRenderedPageBreak",
+            fallbackValue: "ignored",
+          },
+        ),
+      );
+    }
+    if (paragraph.has_column_break) {
+      warnings.push(
+        warning(
+          "page_break.column_unsupported",
+          "段組み用のカラム区切りは未対応のため、本文には反映しません。",
+          "warning",
+          `paragraph:${paragraph.index}`,
+          {
+            part: "word/document.xml",
+            paragraphIndex: paragraph.index,
+            originalValue: "w:br type=column",
+            fallbackValue: "ignored",
+          },
+        ),
+      );
+    }
+    if (paragraph.keep_next) {
+      warnings.push(
+        warning(
+          "pagination.keep_next_limited",
+          "keepNextは段落属性として保持しますが、画面上のページネーションとは完全一致しません。",
+          "info",
+          `paragraph:${paragraph.index}`,
+          { part: "word/document.xml", paragraphIndex: paragraph.index },
+        ),
+      );
+    }
+    if (paragraph.keep_lines) {
+      warnings.push(
+        warning(
+          "pagination.keep_lines_limited",
+          "keepLinesは段落属性として保持しますが、画面上のページネーションとは完全一致しません。",
+          "info",
+          `paragraph:${paragraph.index}`,
+          { part: "word/document.xml", paragraphIndex: paragraph.index },
+        ),
+      );
+    }
+    if (paragraph.widow_control !== null) {
+      warnings.push(
+        warning(
+          "pagination.widow_control_limited",
+          "widowControlは検出のみ行い、画面表示と書き出しには反映しません。",
+          "info",
+          `paragraph:${paragraph.index}`,
+          {
+            part: "word/document.xml",
+            paragraphIndex: paragraph.index,
+            originalValue: paragraph.widow_control,
           },
         ),
       );
@@ -786,8 +1150,16 @@ function applyOoxmlFormattingToHtml(
   html: string,
   formatting: Map<number, ParagraphFormatting>,
   paragraphs: DocxParagraphFormatting[],
+  sections: DocxSection[],
 ): string {
-  if (formatting.size === 0 && !paragraphs.some((paragraph) => paragraph.has_page_break))
+  if (
+    formatting.size === 0 &&
+    !paragraphs.some(
+      (paragraph) =>
+        paragraph.has_page_break ||
+        sectionMetadataForParagraph(paragraph.index, sections)?.breakType,
+    )
+  )
     return html;
   const document = new DOMParser().parseFromString(html, "text/html");
   const blocks = Array.from(document.body.children).filter((element) =>
@@ -798,8 +1170,11 @@ function applyOoxmlFormattingToHtml(
     if (isStandalonePageBreakParagraph(paragraph)) {
       const previousBlock = blocks[Math.max(0, blockIndex - 1)];
       if (previousBlock?.nextElementSibling?.getAttribute("data-page-break") !== "true") {
-        const pageBreak = document.createElement("div");
-        pageBreak.setAttribute("data-page-break", "true");
+        const pageBreak = createPageBreakElement(document, {
+          breakType: "page",
+          source: "docx",
+          importedFrom: "w:br",
+        });
         previousBlock?.after(pageBreak);
       }
       continue;
@@ -811,8 +1186,11 @@ function applyOoxmlFormattingToHtml(
     if (!paragraphFormatting && !paragraph.has_page_break) continue;
     if (!paragraphFormatting) {
       if (element.nextElementSibling?.getAttribute("data-page-break") !== "true") {
-        const pageBreak = document.createElement("div");
-        pageBreak.setAttribute("data-page-break", "true");
+        const pageBreak = createPageBreakElement(document, {
+          breakType: "page",
+          source: "docx",
+          importedFrom: "w:br",
+        });
         element.after(pageBreak);
       }
       continue;
@@ -824,19 +1202,90 @@ function applyOoxmlFormattingToHtml(
       paragraphFormatting.pageBreakBefore &&
       element.previousElementSibling?.getAttribute("data-page-break") !== "true"
     ) {
-      const pageBreak = document.createElement("div");
-      pageBreak.setAttribute("data-page-break", "true");
+      const pageBreak = createPageBreakElement(document, {
+        breakType: "page",
+        source: "docx",
+        importedFrom: "w:pageBreakBefore",
+      });
       element.before(pageBreak);
     }
     if (paragraph.has_page_break) {
       if (element?.nextElementSibling?.getAttribute("data-page-break") !== "true") {
-        const pageBreak = document.createElement("div");
-        pageBreak.setAttribute("data-page-break", "true");
+        const pageBreak = createPageBreakElement(document, {
+          breakType: "page",
+          source: "docx",
+          importedFrom: "w:br",
+        });
         element?.after(pageBreak);
       }
     }
+    const sectionMetadata = sectionMetadataForParagraph(paragraph.index, sections);
+    if (sectionMetadata && element.nextElementSibling?.getAttribute("data-page-break") !== "true") {
+      element.after(
+        createPageBreakElement(document, {
+          breakType: sectionMetadata.breakType,
+          source: "docx",
+          importedFrom: "w:sectPr",
+          sectionMetadata,
+        }),
+      );
+    }
   }
   return document.body.innerHTML;
+}
+
+type PageBreakHtmlOptions = {
+  breakType: "page" | "sectionNextPage" | "sectionContinuous";
+  source: "user" | "docx";
+  importedFrom?: string;
+  sectionMetadata?: SectionBreakMetadata;
+};
+
+type SectionBreakMetadata = {
+  sectionIndex: number;
+  paragraphIndex: number;
+  originalBreakType: string | null;
+  breakType: "page" | "sectionNextPage" | "sectionContinuous";
+  pageSettings: DocxPageSettings | null;
+  headerReferences: string[];
+  footerReferences: string[];
+};
+
+function createPageBreakElement(document: Document, options: PageBreakHtmlOptions): HTMLDivElement {
+  const pageBreak = document.createElement("div");
+  pageBreak.setAttribute("data-page-break", "true");
+  pageBreak.setAttribute("data-break-type", options.breakType);
+  pageBreak.setAttribute("data-source", options.source);
+  if (options.importedFrom) pageBreak.setAttribute("data-imported-from", options.importedFrom);
+  if (options.sectionMetadata) {
+    pageBreak.setAttribute("data-section-metadata", JSON.stringify(options.sectionMetadata));
+  }
+  return pageBreak;
+}
+
+function sectionMetadataForParagraph(
+  paragraphIndex: number,
+  sections: DocxSection[],
+): SectionBreakMetadata | null {
+  const section = sections.find(
+    (candidate) => candidate.paragraph_index === paragraphIndex && candidate.index > 0,
+  );
+  if (!section) return null;
+  return {
+    sectionIndex: section.index,
+    paragraphIndex,
+    originalBreakType: section.break_type,
+    breakType: sectionBreakType(section.break_type),
+    pageSettings: section.page_settings,
+    headerReferences: section.header_references ?? [],
+    footerReferences: section.footer_references ?? [],
+  };
+}
+
+function sectionBreakType(value: string | null): "page" | "sectionNextPage" | "sectionContinuous" {
+  if (value === "continuous") return "sectionContinuous";
+  if (value === "nextPage" || value === "evenPage" || value === "oddPage") return "sectionNextPage";
+  return "sectionNextPage";
 }
 
 function isStandalonePageBreakParagraph(paragraph: DocxParagraphFormatting): boolean {
@@ -931,6 +1380,13 @@ function imageAssetsFromInspection(inspection: DocxInspection | undefined): {
       relationshipId: relationship.relationship_id,
       checksum: relationship.checksum ?? undefined,
     };
+    const dimensions = imageDimensionsFromBase64(relationship.mime_type, relationship.data_base64);
+    if (dimensions) {
+      asset.widthPx = dimensions.widthPx;
+      asset.heightPx = dimensions.heightPx;
+      asset.originalWidthPx = dimensions.widthPx;
+      asset.originalHeightPx = dimensions.heightPx;
+    }
     assetByChecksum.set(dedupeKey, asset);
     assets.push(asset);
   }
@@ -950,8 +1406,77 @@ function attachImageAssetsToHtml(html: string, assets: DocumentAsset[]): string 
     if (!asset?.dataBase64) continue;
     image.setAttribute("data-asset-id", asset.id);
     image.setAttribute("src", `data:${asset.mimeType};base64,${asset.dataBase64}`);
+    if (asset.widthPx) image.setAttribute("data-width-px", String(asset.widthPx));
+    if (asset.heightPx) image.setAttribute("data-height-px", String(asset.heightPx));
+    if (asset.altText) image.setAttribute("data-alt-text", asset.altText);
+    image.setAttribute("data-keep-aspect-ratio", "true");
   }
   return document.body.innerHTML;
+}
+
+function imageDimensionsFromBase64(
+  mimeType: string,
+  base64: string,
+): { widthPx: number; heightPx: number } | null {
+  const bytes = base64ToBytes(base64);
+  if (mimeType === "image/png" && bytes.length >= 24) {
+    return {
+      widthPx: readUint32Be(bytes, 16),
+      heightPx: readUint32Be(bytes, 20),
+    };
+  }
+  if (mimeType === "image/gif" && bytes.length >= 10) {
+    return {
+      widthPx: readUint16Le(bytes, 6),
+      heightPx: readUint16Le(bytes, 8),
+    };
+  }
+  if (mimeType === "image/jpeg") return jpegDimensions(bytes);
+  return null;
+}
+
+function base64ToBytes(base64: string): Uint8Array {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+  return bytes;
+}
+
+function readUint32Be(bytes: Uint8Array, offset: number): number {
+  return (
+    bytes[offset] * 0x1000000 +
+    bytes[offset + 1] * 0x10000 +
+    bytes[offset + 2] * 0x100 +
+    bytes[offset + 3]
+  );
+}
+
+function readUint16Le(bytes: Uint8Array, offset: number): number {
+  return bytes[offset] + bytes[offset + 1] * 0x100;
+}
+
+function readUint16Be(bytes: Uint8Array, offset: number): number {
+  return bytes[offset] * 0x100 + bytes[offset + 1];
+}
+
+function jpegDimensions(bytes: Uint8Array): { widthPx: number; heightPx: number } | null {
+  let offset = 2;
+  while (offset + 9 < bytes.length) {
+    if (bytes[offset] !== 0xff) return null;
+    const marker = bytes[offset + 1];
+    const length = readUint16Be(bytes, offset + 2);
+    if (length < 2) return null;
+    if (marker >= 0xc0 && marker <= 0xc3) {
+      return {
+        heightPx: readUint16Be(bytes, offset + 5),
+        widthPx: readUint16Be(bytes, offset + 7),
+      };
+    }
+    offset += 2 + length;
+  }
+  return null;
 }
 
 function stableAssetId(relationship: DocxImageRelationship): string {
@@ -994,6 +1519,45 @@ function warningsFromHtml(html: string): ImportWarning[] {
       );
     }
   }
+  Array.from(document.querySelectorAll("table")).forEach((table, tableIndex) => {
+    const rows = Array.from(
+      table.querySelectorAll(":scope > thead > tr, :scope > tbody > tr, :scope > tr"),
+    );
+    const cells = Array.from(
+      table.querySelectorAll(
+        [
+          ":scope > thead > tr > th",
+          ":scope > thead > tr > td",
+          ":scope > tbody > tr > th",
+          ":scope > tbody > tr > td",
+          ":scope > tr > th",
+          ":scope > tr > td",
+        ].join(", "),
+      ),
+    );
+    if (table.querySelector("table")) {
+      warnings.push(
+        warning(
+          "table.nested_unsupported",
+          "入れ子になった表は単純化されます。",
+          "warning",
+          `table:${tableIndex}`,
+          { fallbackValue: "inner table is kept as sanitized HTML where possible" },
+        ),
+      );
+    }
+    if (rows.length > 200 || cells.length > 4000) {
+      warnings.push(
+        warning(
+          "table.size_limited",
+          "大きすぎる表を検出しました。編集性能に影響する可能性があります。",
+          "warning",
+          `table:${tableIndex}`,
+          { fallbackValue: `rows:${rows.length} cells:${cells.length}` },
+        ),
+      );
+    }
+  });
 
   return warnings;
 }

@@ -13,8 +13,15 @@ const MAX_TOTAL_UNCOMPRESSED_SIZE: u64 = 150 * 1024 * 1024;
 const MAX_COMPRESSION_RATIO: u64 = 120;
 const MAX_IMAGE_UNCOMPRESSED_SIZE: u64 = 10 * 1024 * 1024;
 const MAX_TOTAL_IMAGE_UNCOMPRESSED_SIZE: u64 = 40 * 1024 * 1024;
+const MAX_TABLE_WARNING_COUNT: usize = 100;
+const MAX_TABLE_ROWS: usize = 200;
+const MAX_TABLE_CELLS: usize = 4000;
 const IMAGE_RELATIONSHIP_TYPE: &str =
     "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image";
+const HEADER_RELATIONSHIP_TYPE: &str =
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/header";
+const FOOTER_RELATIONSHIP_TYPE: &str =
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer";
 
 #[derive(Debug, Serialize)]
 pub struct DocxEntryInfo {
@@ -32,12 +39,41 @@ pub struct DocxInspection {
     has_headers: bool,
     has_footers: bool,
     has_macros: bool,
+    headers: Vec<DocxHeaderFooter>,
+    footers: Vec<DocxHeaderFooter>,
     media_entries: Vec<String>,
     image_relationships: Vec<DocxImageRelationship>,
+    image_warnings: Vec<DocxImageWarning>,
     sections: Vec<DocxSection>,
     paragraphs: Vec<DocxParagraphFormatting>,
+    table_warnings: Vec<DocxTableWarning>,
     entries: Vec<DocxEntryInfo>,
     warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DocxHeaderFooter {
+    kind: String,
+    reference_type: String,
+    relationship_id: Option<String>,
+    source_part: Option<String>,
+    text: String,
+    has_page_number: bool,
+    unsupported_features: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct HeaderFooterReference {
+    kind: String,
+    reference_type: String,
+    relationship_id: String,
+}
+
+#[derive(Debug, Clone)]
+struct RelationshipTarget {
+    relationship_type: String,
+    target: String,
+    external: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -54,6 +90,17 @@ pub struct DocxImageRelationship {
     checksum: Option<String>,
     warning_code: Option<String>,
     warning_message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DocxImageWarning {
+    code: String,
+    message: String,
+    severity: String,
+    relationship_id: Option<String>,
+    part: Option<String>,
+    position: Option<usize>,
+    simplified: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -84,6 +131,8 @@ pub struct DocxSection {
     has_columns: bool,
     has_page_borders: bool,
     has_title_page: bool,
+    header_references: Vec<String>,
+    footer_references: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -103,6 +152,19 @@ pub struct DocxParagraphFormatting {
     keep_lines: bool,
     widow_control: Option<bool>,
     has_page_break: bool,
+    has_rendered_page_break: bool,
+    has_column_break: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DocxTableWarning {
+    code: String,
+    message: String,
+    severity: String,
+    table_index: usize,
+    row_index: Option<usize>,
+    cell_index: Option<usize>,
+    simplified: Option<String>,
 }
 
 impl DocxParagraphFormatting {
@@ -123,6 +185,8 @@ impl DocxParagraphFormatting {
             keep_lines: false,
             widow_control: None,
             has_page_break: false,
+            has_rendered_page_break: false,
+            has_column_break: false,
         }
     }
 }
@@ -137,6 +201,8 @@ impl DocxSection {
             has_columns: false,
             has_page_borders: false,
             has_title_page: false,
+            header_references: Vec::new(),
+            footer_references: Vec::new(),
         }
     }
 }
@@ -156,6 +222,8 @@ fn image_mime_from_path(path: &str) -> Option<&'static str> {
         Some("image/jpeg")
     } else if lower.ends_with(".gif") {
         Some("image/gif")
+    } else if lower.ends_with(".webp") {
+        Some("image/webp")
     } else {
         None
     }
@@ -168,6 +236,8 @@ fn image_mime_from_magic(bytes: &[u8]) -> Option<&'static str> {
         Some("image/jpeg")
     } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
         Some("image/gif")
+    } else if bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP") {
+        Some("image/webp")
     } else {
         None
     }
@@ -287,6 +357,59 @@ fn parse_image_relationships(
     Ok(relationships)
 }
 
+fn parse_relationship_targets(xml: &[u8]) -> Result<Vec<(String, RelationshipTarget)>, String> {
+    let mut reader = Reader::from_reader(xml);
+    reader.config_mut().trim_text(true);
+    let mut relationships = Vec::new();
+    let mut buffer = Vec::new();
+
+    loop {
+        match reader.read_event_into(&mut buffer) {
+            Ok(Event::Empty(event)) | Ok(Event::Start(event))
+                if event.name().as_ref() == b"Relationship" =>
+            {
+                let mut id = String::new();
+                let mut relationship_type = String::new();
+                let mut target = String::new();
+                let mut target_mode = String::new();
+
+                for attribute in event.attributes() {
+                    let attribute = attribute.map_err(|error| error.to_string())?;
+                    let key = attribute.key.as_ref();
+                    let value = attribute
+                        .decode_and_unescape_value(reader.decoder())
+                        .map_err(|error| error.to_string())?
+                        .into_owned();
+                    match key {
+                        b"Id" => id = value,
+                        b"Type" => relationship_type = value,
+                        b"Target" => target = value,
+                        b"TargetMode" => target_mode = value,
+                        _ => {}
+                    }
+                }
+
+                if !id.is_empty() {
+                    relationships.push((
+                        id,
+                        RelationshipTarget {
+                            relationship_type,
+                            target,
+                            external: target_mode.eq_ignore_ascii_case("external"),
+                        },
+                    ));
+                }
+            }
+            Ok(Event::Eof) => break,
+            Ok(_) => {}
+            Err(error) => return Err(error.to_string()),
+        }
+        buffer.clear();
+    }
+
+    Ok(relationships)
+}
+
 fn local_name(name: &[u8]) -> &[u8] {
     name.rsplit(|byte| *byte == b':').next().unwrap_or(name)
 }
@@ -332,6 +455,482 @@ fn attr_bool(
         Some("0") | Some("false") | Some("off") => false,
         _ => true,
     })
+}
+
+fn parse_header_footer_references(xml: &[u8]) -> Result<Vec<HeaderFooterReference>, String> {
+    let mut reader = Reader::from_reader(xml);
+    reader.config_mut().trim_text(false);
+    let mut buffer = Vec::new();
+    let mut references = Vec::new();
+    let mut in_section_properties = false;
+
+    loop {
+        match reader.read_event_into(&mut buffer) {
+            Ok(Event::Start(event)) | Ok(Event::Empty(event)) => {
+                let raw_name = event.name();
+                let name = local_name(raw_name.as_ref());
+                match name {
+                    b"sectPr" => in_section_properties = true,
+                    b"headerReference" | b"footerReference" if in_section_properties => {
+                        if let Some(relationship_id) = attr_value(&reader, &event, b"id")? {
+                            references.push(HeaderFooterReference {
+                                kind: if name == b"headerReference" {
+                                    "header".to_string()
+                                } else {
+                                    "footer".to_string()
+                                },
+                                reference_type: attr_value(&reader, &event, b"type")?
+                                    .unwrap_or_else(|| "default".to_string()),
+                                relationship_id,
+                            });
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Ok(Event::End(event)) => {
+                if local_name(event.name().as_ref()) == b"sectPr" {
+                    in_section_properties = false;
+                }
+            }
+            Ok(Event::Eof) => break,
+            Ok(_) => {}
+            Err(error) => return Err(error.to_string()),
+        }
+        buffer.clear();
+    }
+
+    Ok(references)
+}
+
+fn parse_header_footer_xml(xml: &[u8]) -> Result<(String, bool, Vec<String>), String> {
+    let mut reader = Reader::from_reader(xml);
+    reader.config_mut().trim_text(false);
+    let mut buffer = Vec::new();
+    let mut paragraphs: Vec<String> = Vec::new();
+    let mut current_paragraph = String::new();
+    let mut in_paragraph = false;
+    let mut in_text = false;
+    let mut in_instruction_text = false;
+    let mut has_page_number = false;
+    let mut unsupported_features: Vec<String> = Vec::new();
+
+    loop {
+        match reader.read_event_into(&mut buffer) {
+            Ok(Event::Start(event)) => {
+                let raw_name = event.name();
+                let name = local_name(raw_name.as_ref());
+                match name {
+                    b"p" => {
+                        in_paragraph = true;
+                        current_paragraph.clear();
+                    }
+                    b"t" => in_text = true,
+                    b"instrText" => in_instruction_text = true,
+                    b"fldSimple" => {
+                        let instruction =
+                            attr_value(&reader, &event, b"instr")?.unwrap_or_default();
+                        if instruction.to_ascii_uppercase().contains("PAGE") {
+                            has_page_number = true;
+                        } else {
+                            push_unique(&mut unsupported_features, "field");
+                        }
+                    }
+                    b"drawing" | b"pict" | b"tbl" | b"sdt" => {
+                        push_unique(
+                            &mut unsupported_features,
+                            std::str::from_utf8(name).unwrap_or("unknown"),
+                        );
+                    }
+                    _ => {}
+                }
+            }
+            Ok(Event::Empty(event)) => {
+                let raw_name = event.name();
+                let name = local_name(raw_name.as_ref());
+                match name {
+                    b"fldSimple" => {
+                        let instruction =
+                            attr_value(&reader, &event, b"instr")?.unwrap_or_default();
+                        if instruction.to_ascii_uppercase().contains("PAGE") {
+                            has_page_number = true;
+                        } else {
+                            push_unique(&mut unsupported_features, "field");
+                        }
+                    }
+                    b"tab" if in_paragraph => current_paragraph.push('\t'),
+                    b"br" if in_paragraph => current_paragraph.push('\n'),
+                    b"fldChar" => push_unique(&mut unsupported_features, "complex_field"),
+                    b"drawing" | b"pict" | b"tbl" | b"sdt" => {
+                        push_unique(
+                            &mut unsupported_features,
+                            std::str::from_utf8(name).unwrap_or("unknown"),
+                        );
+                    }
+                    _ => {}
+                }
+            }
+            Ok(Event::Text(event)) => {
+                if in_text && in_paragraph {
+                    current_paragraph
+                        .push_str(&event.xml10_content().map_err(|error| error.to_string())?);
+                }
+                if in_instruction_text {
+                    let instruction = event.xml10_content().map_err(|error| error.to_string())?;
+                    if instruction.to_ascii_uppercase().contains("PAGE") {
+                        has_page_number = true;
+                    } else {
+                        push_unique(&mut unsupported_features, "field");
+                    }
+                }
+            }
+            Ok(Event::End(event)) => {
+                let raw_name = event.name();
+                let name = local_name(raw_name.as_ref());
+                match name {
+                    b"p" => {
+                        in_paragraph = false;
+                        paragraphs.push(current_paragraph.clone());
+                        current_paragraph.clear();
+                    }
+                    b"t" => in_text = false,
+                    b"instrText" => in_instruction_text = false,
+                    _ => {}
+                }
+            }
+            Ok(Event::Eof) => break,
+            Ok(_) => {}
+            Err(error) => return Err(error.to_string()),
+        }
+        buffer.clear();
+    }
+
+    let text = paragraphs
+        .into_iter()
+        .map(|paragraph| paragraph.trim().to_string())
+        .filter(|paragraph| !paragraph.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    Ok((text, has_page_number, unsupported_features))
+}
+
+fn push_unique(values: &mut Vec<String>, value: &str) {
+    if !values.iter().any(|candidate| candidate == value) {
+        values.push(value.to_string());
+    }
+}
+
+fn push_image_warning(
+    warnings: &mut Vec<DocxImageWarning>,
+    code: &str,
+    message: &str,
+    relationship_id: Option<String>,
+    position: Option<usize>,
+    simplified: Option<&str>,
+) {
+    if warnings.iter().any(|warning| {
+        warning.code == code
+            && warning.relationship_id == relationship_id
+            && warning.position == position
+    }) {
+        return;
+    }
+    warnings.push(DocxImageWarning {
+        code: code.to_string(),
+        message: message.to_string(),
+        severity: "warning".to_string(),
+        relationship_id,
+        part: Some("word/document.xml".to_string()),
+        position,
+        simplified: simplified.map(str::to_string),
+    });
+}
+
+fn inspect_image_warnings(xml: &[u8]) -> Result<Vec<DocxImageWarning>, String> {
+    let mut reader = Reader::from_reader(xml);
+    reader.config_mut().trim_text(false);
+    let mut buffer = Vec::new();
+    let mut warnings = Vec::new();
+    let mut drawing_index = 0_usize;
+    let mut current_position: Option<usize> = None;
+    let mut current_relationship_id: Option<String> = None;
+
+    loop {
+        match reader.read_event_into(&mut buffer) {
+            Ok(Event::Start(event)) | Ok(Event::Empty(event)) => {
+                let raw_name = event.name();
+                let name = local_name(raw_name.as_ref());
+                match name {
+                    b"drawing" => {
+                        current_position = Some(drawing_index);
+                        drawing_index += 1;
+                    }
+                    b"anchor" => push_image_warning(
+                        &mut warnings,
+                        "image.anchored_unsupported",
+                        "anchored imageは通常の画像配置へ単純化します。",
+                        current_relationship_id.clone(),
+                        current_position,
+                        Some("anchor positioning and wrapping are ignored"),
+                    ),
+                    b"wrapSquare" | b"wrapTight" | b"wrapThrough" | b"wrapTopAndBottom"
+                    | b"wrapNone" => push_image_warning(
+                        &mut warnings,
+                        "image.text_wrapping_unsupported",
+                        "画像のtext wrappingは保持しません。",
+                        current_relationship_id.clone(),
+                        current_position,
+                        Some("text wrapping is ignored"),
+                    ),
+                    b"srcRect" => push_image_warning(
+                        &mut warnings,
+                        "image.crop_unsupported",
+                        "画像cropは保持しません。",
+                        current_relationship_id.clone(),
+                        current_position,
+                        Some("crop is ignored"),
+                    ),
+                    b"graphicFrameLocks" | b"effectLst" | b"effectDag" | b"alphaModFix" => {
+                        push_image_warning(
+                            &mut warnings,
+                            "image.effects_unsupported",
+                            "画像の特殊効果は保持しません。",
+                            current_relationship_id.clone(),
+                            current_position,
+                            Some("effects are ignored"),
+                        );
+                    }
+                    b"grpSp" => push_image_warning(
+                        &mut warnings,
+                        "image.grouped_shape_unsupported",
+                        "grouped shapeは未対応です。",
+                        current_relationship_id.clone(),
+                        current_position,
+                        Some("grouped shape is not preserved"),
+                    ),
+                    b"wgp" | b"wpc" => push_image_warning(
+                        &mut warnings,
+                        "image.drawing_canvas_unsupported",
+                        "drawing canvasは未対応です。",
+                        current_relationship_id.clone(),
+                        current_position,
+                        Some("drawing canvas is not preserved"),
+                    ),
+                    b"blip" => {
+                        if let Some(relationship_id) = attr_value(&reader, &event, b"embed")? {
+                            current_relationship_id = Some(relationship_id);
+                        }
+                    }
+                    b"xfrm" => {
+                        if let Some(rotation) = attr_value(&reader, &event, b"rot")? {
+                            if rotation != "0" {
+                                push_image_warning(
+                                    &mut warnings,
+                                    "image.rotation_unsupported",
+                                    "画像rotationは保持しません。",
+                                    current_relationship_id.clone(),
+                                    current_position,
+                                    Some("rotation is ignored"),
+                                );
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Ok(Event::End(event)) => {
+                if local_name(event.name().as_ref()) == b"drawing" {
+                    current_position = None;
+                    current_relationship_id = None;
+                }
+            }
+            Ok(Event::Eof) => break,
+            Ok(_) => {}
+            Err(error) => return Err(error.to_string()),
+        }
+        buffer.clear();
+    }
+
+    Ok(warnings)
+}
+
+fn push_table_warning(
+    warnings: &mut Vec<DocxTableWarning>,
+    code: &str,
+    message: &str,
+    table_index: usize,
+    row_index: Option<usize>,
+    cell_index: Option<usize>,
+    simplified: Option<&str>,
+) {
+    if warnings.len() >= MAX_TABLE_WARNING_COUNT {
+        return;
+    }
+    if warnings.iter().any(|warning| {
+        warning.code == code
+            && warning.table_index == table_index
+            && warning.row_index == row_index
+            && warning.cell_index == cell_index
+    }) {
+        return;
+    }
+    warnings.push(DocxTableWarning {
+        code: code.to_string(),
+        message: message.to_string(),
+        severity: "warning".to_string(),
+        table_index,
+        row_index,
+        cell_index,
+        simplified: simplified.map(str::to_string),
+    });
+}
+
+fn inspect_table_warnings(xml: &[u8]) -> Result<Vec<DocxTableWarning>, String> {
+    let mut reader = Reader::from_reader(xml);
+    reader.config_mut().trim_text(false);
+    let mut buffer = Vec::new();
+    let mut warnings = Vec::new();
+    let mut table_depth = 0_usize;
+    let mut table_count = 0_usize;
+    let mut active_table_index: Option<usize> = None;
+    let mut row_index: Option<usize> = None;
+    let mut cell_index: Option<usize> = None;
+    let mut row_count = 0_usize;
+    let mut cell_count = 0_usize;
+    let mut cell_depth = 0_usize;
+
+    loop {
+        match reader.read_event_into(&mut buffer) {
+            Ok(Event::Start(event)) | Ok(Event::Empty(event)) => {
+                let raw_name = event.name();
+                let name = local_name(raw_name.as_ref());
+                match name {
+                    b"tbl" => {
+                        if table_depth == 0 {
+                            active_table_index = Some(table_count);
+                            table_count += 1;
+                            row_index = None;
+                            cell_index = None;
+                            row_count = 0;
+                            cell_count = 0;
+                        } else {
+                            push_table_warning(
+                                &mut warnings,
+                                "table.nested_unsupported",
+                                "入れ子になった表は単純化されます。",
+                                active_table_index.unwrap_or(table_count),
+                                row_index,
+                                cell_index,
+                                Some("nested table structure is not preserved as a nested editable table"),
+                            );
+                        }
+                        table_depth = table_depth.saturating_add(1);
+                    }
+                    b"tblpPr" if table_depth > 0 => push_table_warning(
+                        &mut warnings,
+                        "table.floating_unsupported",
+                        "floating tableまたはtext wrapping付き表は通常の表として読み込みます。",
+                        active_table_index.unwrap_or(0),
+                        row_index,
+                        cell_index,
+                        Some("floating/wrapping layout is ignored"),
+                    ),
+                    b"tr" if table_depth == 1 => {
+                        row_count += 1;
+                        row_index = Some(row_count - 1);
+                        cell_index = None;
+                    }
+                    b"tc" if table_depth == 1 => {
+                        cell_count += 1;
+                        cell_index = Some(cell_index.map_or(0, |index| index + 1));
+                        cell_depth += 1;
+                    }
+                    b"drawing" | b"pict" | b"object" if cell_depth > 0 => push_table_warning(
+                        &mut warnings,
+                        "table.cell_object_unsupported",
+                        "セル内の画像またはオブジェクトは完全には保持されません。",
+                        active_table_index.unwrap_or(0),
+                        row_index,
+                        cell_index,
+                        Some("cell object content is simplified"),
+                    ),
+                    b"oMath" if cell_depth > 0 => push_table_warning(
+                        &mut warnings,
+                        "table.cell_math_unsupported",
+                        "セル内の数式は未対応です。",
+                        active_table_index.unwrap_or(0),
+                        row_index,
+                        cell_index,
+                        Some("math object is not preserved"),
+                    ),
+                    b"sdt" if cell_depth > 0 => push_table_warning(
+                        &mut warnings,
+                        "table.cell_sdt_unsupported",
+                        "セル内のstructured document tagは未対応です。",
+                        active_table_index.unwrap_or(0),
+                        row_index,
+                        cell_index,
+                        Some("structured document tag is simplified"),
+                    ),
+                    b"chart" | b"diagram" if cell_depth > 0 => push_table_warning(
+                        &mut warnings,
+                        "table.cell_drawing_unsupported",
+                        "セル内のグラフまたはSmartArtは未対応です。",
+                        active_table_index.unwrap_or(0),
+                        row_index,
+                        cell_index,
+                        Some("chart or SmartArt is not preserved"),
+                    ),
+                    b"tl2br" | b"tr2bl" if cell_depth > 0 => push_table_warning(
+                        &mut warnings,
+                        "table.cell_diagonal_border_unsupported",
+                        "斜線付きセルは斜線を保持しません。",
+                        active_table_index.unwrap_or(0),
+                        row_index,
+                        cell_index,
+                        Some("diagonal cell border is ignored"),
+                    ),
+                    _ => {}
+                }
+            }
+            Ok(Event::End(event)) => {
+                let raw_name = event.name();
+                let name = local_name(raw_name.as_ref());
+                match name {
+                    b"tc" if cell_depth > 0 => cell_depth -= 1,
+                    b"tbl" if table_depth > 0 => {
+                        table_depth -= 1;
+                        if table_depth == 0 {
+                            let table_index = active_table_index.unwrap_or(0);
+                            if row_count > MAX_TABLE_ROWS || cell_count > MAX_TABLE_CELLS {
+                                push_table_warning(
+                                    &mut warnings,
+                                    "table.size_limited",
+                                    "大きすぎる表を検出しました。編集性能に影響する可能性があります。",
+                                    table_index,
+                                    None,
+                                    None,
+                                    Some("large table may be simplified by the frontend importer"),
+                                );
+                            }
+                            active_table_index = None;
+                            row_index = None;
+                            cell_index = None;
+                            row_count = 0;
+                            cell_count = 0;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Ok(Event::Eof) => break,
+            Ok(_) => {}
+            Err(error) => return Err(error.to_string()),
+        }
+        buffer.clear();
+    }
+
+    Ok(warnings)
 }
 
 fn parse_page_settings(
@@ -440,6 +1039,20 @@ fn inspect_document_xml(
                             section.has_title_page = true;
                         }
                     }
+                    b"headerReference" if in_section_properties => {
+                        if let Some(section) = current_section.as_mut() {
+                            if let Some(reference_type) = attr_value(&reader, &event, b"type")? {
+                                section.header_references.push(reference_type);
+                            }
+                        }
+                    }
+                    b"footerReference" if in_section_properties => {
+                        if let Some(section) = current_section.as_mut() {
+                            if let Some(reference_type) = attr_value(&reader, &event, b"type")? {
+                                section.footer_references.push(reference_type);
+                            }
+                        }
+                    }
                     b"jc" if in_paragraph_properties => {
                         if let Some(paragraph) = current_paragraph.as_mut() {
                             paragraph.alignment = attr_value(&reader, &event, b"val")?;
@@ -482,10 +1095,17 @@ fn inspect_document_xml(
                         }
                     }
                     b"br" => {
-                        if attr_value(&reader, &event, b"type")?.as_deref() == Some("page") {
-                            if let Some(paragraph) = current_paragraph.as_mut() {
-                                paragraph.has_page_break = true;
+                        if let Some(paragraph) = current_paragraph.as_mut() {
+                            match attr_value(&reader, &event, b"type")?.as_deref() {
+                                Some("page") => paragraph.has_page_break = true,
+                                Some("column") => paragraph.has_column_break = true,
+                                _ => {}
                             }
+                        }
+                    }
+                    b"lastRenderedPageBreak" => {
+                        if let Some(paragraph) = current_paragraph.as_mut() {
+                            paragraph.has_rendered_page_break = true;
                         }
                     }
                     _ => {}
@@ -525,6 +1145,20 @@ fn inspect_document_xml(
                             section.has_title_page = true;
                         }
                     }
+                    b"headerReference" if in_section_properties => {
+                        if let Some(section) = current_section.as_mut() {
+                            if let Some(reference_type) = attr_value(&reader, &event, b"type")? {
+                                section.header_references.push(reference_type);
+                            }
+                        }
+                    }
+                    b"footerReference" if in_section_properties => {
+                        if let Some(section) = current_section.as_mut() {
+                            if let Some(reference_type) = attr_value(&reader, &event, b"type")? {
+                                section.footer_references.push(reference_type);
+                            }
+                        }
+                    }
                     b"jc" if in_paragraph_properties => {
                         if let Some(paragraph) = current_paragraph.as_mut() {
                             paragraph.alignment = attr_value(&reader, &event, b"val")?;
@@ -567,10 +1201,17 @@ fn inspect_document_xml(
                         }
                     }
                     b"br" => {
-                        if attr_value(&reader, &event, b"type")?.as_deref() == Some("page") {
-                            if let Some(paragraph) = current_paragraph.as_mut() {
-                                paragraph.has_page_break = true;
+                        if let Some(paragraph) = current_paragraph.as_mut() {
+                            match attr_value(&reader, &event, b"type")?.as_deref() {
+                                Some("page") => paragraph.has_page_break = true,
+                                Some("column") => paragraph.has_column_break = true,
+                                _ => {}
                             }
+                        }
+                    }
+                    b"lastRenderedPageBreak" => {
+                        if let Some(paragraph) = current_paragraph.as_mut() {
+                            paragraph.has_rendered_page_break = true;
                         }
                     }
                     _ => {}
@@ -692,6 +1333,103 @@ fn extract_docx_images(
     Ok(relationships)
 }
 
+fn extract_header_footers(
+    archive: &mut ZipArchive<File>,
+    document_xml: &[u8],
+) -> Result<(Vec<DocxHeaderFooter>, Vec<DocxHeaderFooter>), String> {
+    let references = parse_header_footer_references(document_xml)?;
+    if references.is_empty() {
+        return Ok((Vec::new(), Vec::new()));
+    }
+    let rels_xml = read_entry_bytes(
+        archive,
+        "word/_rels/document.xml.rels",
+        MAX_ENTRY_UNCOMPRESSED_SIZE,
+    )
+    .unwrap_or_default();
+    let relationships = parse_relationship_targets(&rels_xml)?;
+    let mut headers = Vec::new();
+    let mut footers = Vec::new();
+
+    for reference in references {
+        let relationship = relationships
+            .iter()
+            .find(|(id, _)| id == &reference.relationship_id)
+            .map(|(_, relationship)| relationship);
+        let mut item = DocxHeaderFooter {
+            kind: reference.kind.clone(),
+            reference_type: reference.reference_type,
+            relationship_id: Some(reference.relationship_id),
+            source_part: None,
+            text: String::new(),
+            has_page_number: false,
+            unsupported_features: Vec::new(),
+        };
+
+        let Some(relationship) = relationship else {
+            item.unsupported_features
+                .push("missing_relationship".to_string());
+            push_header_footer_item(&mut headers, &mut footers, item);
+            continue;
+        };
+        if relationship.external {
+            item.unsupported_features
+                .push("external_relationship".to_string());
+            push_header_footer_item(&mut headers, &mut footers, item);
+            continue;
+        }
+        let expected_type = if reference.kind == "header" {
+            HEADER_RELATIONSHIP_TYPE
+        } else {
+            FOOTER_RELATIONSHIP_TYPE
+        };
+        if relationship.relationship_type != expected_type {
+            item.unsupported_features
+                .push("invalid_relationship_type".to_string());
+            push_header_footer_item(&mut headers, &mut footers, item);
+            continue;
+        }
+        let resolved_part =
+            match resolve_relationship_target("word/document.xml", &relationship.target) {
+                Ok(part) => part,
+                Err(_) => {
+                    item.unsupported_features
+                        .push("invalid_relationship_target".to_string());
+                    push_header_footer_item(&mut headers, &mut footers, item);
+                    continue;
+                }
+            };
+        item.source_part = Some(resolved_part.clone());
+        match read_entry_bytes(archive, &resolved_part, MAX_ENTRY_UNCOMPRESSED_SIZE)
+            .and_then(|xml| parse_header_footer_xml(&xml))
+        {
+            Ok((text, has_page_number, unsupported_features)) => {
+                item.text = text;
+                item.has_page_number = has_page_number;
+                item.unsupported_features = unsupported_features;
+            }
+            Err(_) => item
+                .unsupported_features
+                .push("unreadable_part".to_string()),
+        }
+        push_header_footer_item(&mut headers, &mut footers, item);
+    }
+
+    Ok((headers, footers))
+}
+
+fn push_header_footer_item(
+    headers: &mut Vec<DocxHeaderFooter>,
+    footers: &mut Vec<DocxHeaderFooter>,
+    item: DocxHeaderFooter,
+) {
+    if item.kind == "header" {
+        headers.push(item);
+    } else {
+        footers.push(item);
+    }
+}
+
 pub fn inspect_docx<P: AsRef<Path>>(path: P) -> Result<DocxInspection, String> {
     let file = File::open(path).map_err(|error| error.to_string())?;
     let mut archive = ZipArchive::new(file).map_err(|error| error.to_string())?;
@@ -704,10 +1442,14 @@ pub fn inspect_docx<P: AsRef<Path>>(path: P) -> Result<DocxInspection, String> {
         has_headers: false,
         has_footers: false,
         has_macros: false,
+        headers: Vec::new(),
+        footers: Vec::new(),
         media_entries: Vec::new(),
         image_relationships: Vec::new(),
+        image_warnings: Vec::new(),
         sections: Vec::new(),
         paragraphs: Vec::new(),
+        table_warnings: Vec::new(),
         entries: Vec::new(),
         warnings: Vec::new(),
     };
@@ -795,6 +1537,11 @@ pub fn inspect_docx<P: AsRef<Path>>(path: P) -> Result<DocxInspection, String> {
     let (sections, paragraphs) = inspect_document_xml(&document_xml)?;
     inspection.sections = sections;
     inspection.paragraphs = paragraphs;
+    inspection.image_warnings = inspect_image_warnings(&document_xml)?;
+    inspection.table_warnings = inspect_table_warnings(&document_xml)?;
+    let (headers, footers) = extract_header_footers(&mut archive, &document_xml)?;
+    inspection.headers = headers;
+    inspection.footers = footers;
     inspection.image_relationships = extract_docx_images(&mut archive, &rels_parts)?;
 
     Ok(inspection)
@@ -962,9 +1709,71 @@ mod tests {
     }
 
     #[test]
+    fn detects_unsupported_table_structures() -> Result<(), Box<dyn Error>> {
+        let xml =
+            br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+          <w:body>
+            <w:tbl>
+              <w:tblPr><w:tblpPr/></w:tblPr>
+              <w:tr>
+                <w:tc>
+                  <w:tcPr><w:tcBorders><w:tl2br/></w:tcBorders></w:tcPr>
+                  <w:p><w:r><w:drawing/></w:r></w:p>
+                  <w:tbl><w:tr><w:tc><w:p/></w:tc></w:tr></w:tbl>
+                </w:tc>
+              </w:tr>
+            </w:tbl>
+          </w:body>
+        </w:document>"#;
+        let path = write_zip_fixture("unsupported-table", &[("word/document.xml", xml)])?;
+        let inspection = inspect_docx(&path)?;
+        fs::remove_file(path)?;
+        let codes = inspection
+            .table_warnings
+            .iter()
+            .map(|warning| warning.code.as_str())
+            .collect::<Vec<_>>();
+
+        assert!(codes.contains(&"table.floating_unsupported"));
+        assert!(codes.contains(&"table.cell_diagonal_border_unsupported"));
+        assert!(codes.contains(&"table.cell_object_unsupported"));
+        assert!(codes.contains(&"table.nested_unsupported"));
+        Ok(())
+    }
+
+    #[test]
+    fn detects_unsupported_image_layout() -> Result<(), Box<dyn Error>> {
+        let xml = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+          <w:body>
+            <w:p>
+              <w:r>
+                <w:drawing>
+                  <wp:anchor>
+                    <wp:wrapSquare/>
+                    <a:blip r:embed="rIdImage"/>
+                    <a:srcRect l="1000"/>
+                  </wp:anchor>
+                </w:drawing>
+              </w:r>
+            </w:p>
+          </w:body>
+        </w:document>"#;
+        let warnings = super::inspect_image_warnings(xml)?;
+        let codes = warnings
+            .iter()
+            .map(|warning| warning.code.as_str())
+            .collect::<Vec<_>>();
+
+        assert!(codes.contains(&"image.anchored_unsupported"));
+        assert!(codes.contains(&"image.text_wrapping_unsupported"));
+        assert!(codes.contains(&"image.crop_unsupported"));
+        Ok(())
+    }
+
+    #[test]
     fn parses_page_section_and_paragraph_properties() -> Result<(), Box<dyn Error>> {
         let xml = br#"<?xml version="1.0"?>
-        <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+        <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
           <w:body>
             <w:p>
               <w:pPr>
@@ -976,9 +1785,11 @@ mod tests {
                 <w:keepLines/>
                 <w:widowControl w:val="0"/>
               </w:pPr>
-              <w:r><w:t>body</w:t><w:br w:type="page"/></w:r>
+              <w:r><w:t>body</w:t><w:br w:type="page"/><w:lastRenderedPageBreak/><w:br w:type="column"/></w:r>
             </w:p>
             <w:sectPr>
+              <w:headerReference w:type="default" r:id="rIdHeader"/>
+              <w:footerReference w:type="default" r:id="rIdFooter"/>
               <w:pgSz w:w="16838" w:h="11906" w:orient="landscape"/>
               <w:pgMar w:top="680" w:right="737" w:bottom="794" w:left="850" w:header="454" w:footer="510" w:gutter="113"/>
               <w:pgBorders/>
@@ -1000,6 +1811,8 @@ mod tests {
         assert!(paragraphs[0].keep_lines);
         assert_eq!(paragraphs[0].widow_control, Some(false));
         assert!(paragraphs[0].has_page_break);
+        assert!(paragraphs[0].has_rendered_page_break);
+        assert!(paragraphs[0].has_column_break);
         assert_eq!(sections.len(), 1);
         assert_eq!(
             sections[0]
@@ -1018,6 +1831,8 @@ mod tests {
         assert!(sections[0].has_columns);
         assert!(sections[0].has_page_borders);
         assert!(sections[0].has_title_page);
+        assert_eq!(sections[0].header_references, vec!["default".to_string()]);
+        assert_eq!(sections[0].footer_references, vec!["default".to_string()]);
         Ok(())
     }
 
@@ -1030,6 +1845,36 @@ mod tests {
         assert_eq!(sections.len(), 2);
         assert_eq!(sections[0].paragraph_index, Some(0));
         assert_eq!(sections[1].break_type.as_deref(), Some("nextPage"));
+        Ok(())
+    }
+
+    #[test]
+    fn extracts_header_footer_text_and_page_number() -> Result<(), Box<dyn Error>> {
+        let document_xml = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body><w:p><w:r><w:t>body</w:t></w:r></w:p><w:sectPr><w:headerReference w:type="default" r:id="rIdHeader"/><w:footerReference w:type="default" r:id="rIdFooter"/></w:sectPr></w:body></w:document>"#;
+        let rels = format!(
+            r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdHeader" Type="{}" Target="header1.xml"/><Relationship Id="rIdFooter" Type="{}" Target="footer1.xml"/></Relationships>"#,
+            super::HEADER_RELATIONSHIP_TYPE,
+            super::FOOTER_RELATIONSHIP_TYPE
+        );
+        let header_xml = br#"<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:p><w:r><w:t>Header text</w:t></w:r></w:p></w:hdr>"#;
+        let footer_xml = br#"<w:ftr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:p><w:r><w:t>Footer text</w:t></w:r><w:fldSimple w:instr="PAGE"/></w:p></w:ftr>"#;
+        let path = write_zip_fixture(
+            "header-footer",
+            &[
+                ("word/document.xml", document_xml),
+                ("word/_rels/document.xml.rels", rels.as_bytes()),
+                ("word/header1.xml", header_xml),
+                ("word/footer1.xml", footer_xml),
+            ],
+        )?;
+        let inspection = inspect_docx(&path)?;
+        fs::remove_file(path)?;
+
+        assert_eq!(inspection.headers.len(), 1);
+        assert_eq!(inspection.headers[0].text, "Header text");
+        assert_eq!(inspection.footers.len(), 1);
+        assert_eq!(inspection.footers[0].text, "Footer text");
+        assert!(inspection.footers[0].has_page_number);
         Ok(())
     }
 

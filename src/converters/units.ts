@@ -95,6 +95,10 @@ export function pixelsToPoints(pixels: number, dpi = DEFAULT_PIXEL_DPI): number 
   return (pixels / dpi) * POINTS_PER_INCH;
 }
 
+export function pixelsToTwips(pixels: number, dpi = DEFAULT_PIXEL_DPI): number {
+  return pointsToTwips(pixelsToPoints(pixels, dpi));
+}
+
 export function pointsToPixels(points: number, dpi = DEFAULT_PIXEL_DPI): number {
   assertNonNegativeUnit(points, "point");
   assertNonNegativeUnit(dpi, "DPI");

@@ -19,6 +19,8 @@ Visual spacing is not represented by automatically inserted empty paragraphs. Em
 
 Page breaks are represented by the dedicated `pageBreak` node. They are not represented by repeated newlines or empty paragraphs.
 
+The editor renders the body inside a paper-like page frame derived from `pageSettings`. Explicit page breaks are editable document nodes; automatic page boundaries are visual-only and are not persisted. Word pagination is not reproduced exactly.
+
 ## Personal Display Preferences
 
 Personal editing preferences are stored outside `DocumentProject` in local app storage. They control:
@@ -133,6 +135,18 @@ DOCX-facing paragraph formatting is stored separately in `DocumentProject`.
 
 Per-paragraph formatting is stored on Tiptap paragraph and heading nodes as validated `paragraphFormatting` attributes. New projects also store `documentDefaults`, including body paragraph spacing and heading spacing. Existing documents are not overwritten when the user changes personal preferences.
 
+The settings panel writes page size, orientation, and margins into `DocumentProject.pageSettings`. It writes the currently selected paragraph or heading formatting into that node's `paragraphFormatting` attribute and mirrors the latest edited values in `DocumentProject.paragraphSettings` for project persistence and UI state.
+
+Header and footer editing uses independent Tiptap editor instances in the settings panel. They write only to `DocumentProject.header` and `DocumentProject.footer`; they do not share the body editor instance, selection, commands, or undo history. Footer page number placement is saved as document data, not as a personal preference.
+
+Table editing uses Tiptap's table commands and stores the result only in body `editorContent`. When the cursor is inside a table, toolbar commands can add rows above/below, add columns left/right, delete the current row/column, delete the table, merge selected cells, split the current merged cell, and toggle the header row. Outside a table these commands are disabled by the editor command state.
+
+The settings panel exposes selected-cell settings for background color and vertical alignment. Background color is stored as a normalized HEX value or `null`; invalid values are ignored. Vertical alignment is stored as `top`, `middle`, or `bottom`. When multiple cells are selected, Tiptap applies supported attribute updates to the selection; otherwise the current cell is the target.
+
+Image editing stores binary data only in `DocumentProject.assets`. The selected image settings panel edits the image node's `assetId`, width and height in pixels, `keepAspectRatio`, left/center/right alignment, and alt text. Width and height changes use numeric input; when aspect ratio lock is enabled, changing one side recalculates the other side from the current image size. Reset uses the asset's original dimensions and fits the image within the editor page width.
+
+Image insertion uses a local file dialog and supports PNG, JPEG, GIF, and WebP for project storage. External URL images are never fetched. Unsupported formats, oversized files, oversized dimensions, corrupted image data, and image read failures are shown to the user without including document text or base64 data.
+
 When a new document is created, the app copies the current new-document defaults into `DocumentProject.documentDefaults`. After creation, those defaults belong to the document.
 
 ## Paragraph Gap Rule
@@ -163,6 +177,12 @@ When Word-specific paragraph spacing or line spacing is simplified, the import r
 
 Imported DOCX paragraph settings never change Enter or Shift+Enter behavior. Editing behavior always follows personal preferences.
 
+Header and footer import is intentionally limited to referenced default header/footer plain text and PAGE fields. First-page, odd/even, multiple header/footer variants, drawings, tables, structured document tags, and non-PAGE fields generate `ImportWarning` entries.
+
+Table import supports normal tables, header cells/rows when represented in HTML, horizontal and vertical merges when Mammoth exposes `colspan` / `rowspan`, column and cell widths when represented as HTML width or colgroup data, cell background color, cell vertical alignment, and basic paragraphs inside cells. Nested tables, floating/text-wrapped tables, diagonal cells, complex table style inheritance, cell images/objects, equations, SmartArt, charts, structured document tags, oversized tables, and unrecoverable table structures generate `ImportWarning` entries and may be simplified.
+
+Image import supports embedded PNG, JPEG, GIF, and WebP assets, relationship IDs, source parts, MIME type, checksums, base64 data, and intrinsic image dimensions when the format header exposes them. Inline images are treated as normal editable images. Anchored/floating images, text wrapping, crop, rotation, effects, grouped shapes, drawing canvas, missing media parts, broken relationships, external links, unsupported MIME types, MIME mismatches, and image size limits generate `ImportWarning` entries. Anchored layout is simplified to basic left/center/right paragraph placement where possible.
+
 ## DOCX Export Defaults
 
 DOCX export generates a new DOCX from `ExportDocument`; it does not patch the original DOCX.
@@ -179,3 +199,13 @@ Paragraphs and headings explicitly emit:
 If a paragraph has no local `paragraphFormatting`, export uses `DocumentProject.documentDefaults`. Personal visual settings are not exported unless they were explicitly copied into document defaults when creating a new document.
 
 `hardBreak`, `paragraph`, and `pageBreak` remain distinct during export.
+
+Header/footer export writes plain text paragraphs and optional footer PAGE fields through `ExportDocument`. It does not patch or preserve the original header/footer XML.
+
+Table export writes a newly generated DOCX table through `ExportDocument`. It supports rows, cells, header rows, merged cells, column widths, table width, cell background color, vertical alignment, Japanese text, multiple paragraphs, and empty cells. It does not preserve original Word table styles, floating layout, text wrapping, diagonal borders, nested table semantics, or unsupported objects inside cells.
+
+Image export writes a newly generated DOCX image through `ExportDocument`. It supports PNG, JPEG, GIF, width, height, alt text, and left/center/right paragraph alignment. WebP, missing assets, missing base64 data, and unsupported MIME types fail export explicitly instead of pretending to be another format.
+
+## Save Recovery Behavior
+
+Document editing changes mark the project dirty and schedule an autosave recovery file. Autosave status is separate from explicit save status: the app can show autosave pending, autosaving, autosaved, autosave error, or recovered editing. Explicit save creates a backup before replacing the normal project file. Recovery candidates are shown to the user and are never written back to the normal project file without an explicit save.

@@ -12,6 +12,16 @@ import { EditorToolbar } from "../src/features/editor/EditorToolbar";
 import { DEFAULT_TOOLBAR_COMMAND_ORDER } from "../src/preferences/toolbar";
 import { getDefaultUserPreferences } from "../src/stores/userPreferences";
 
+const defaultImageSettings = {
+  widthPx: 320,
+  heightPx: 240,
+  originalWidthPx: 320,
+  originalHeightPx: 240,
+  keepAspectRatio: true,
+  alignment: "left" as const,
+  altText: "",
+};
+
 describe("AppTopbar", () => {
   it("renders save status and calls file operation handlers", () => {
     const handlers = {
@@ -96,6 +106,14 @@ describe("SaveStatus", () => {
     expect(screen.getByText("保存中")).toBeTruthy();
     rerender(<SaveStatus status="error" />);
     expect(screen.getByText("保存エラー")).toBeTruthy();
+    rerender(<SaveStatus status="autosave-pending" />);
+    expect(screen.getByText("自動保存待機中")).toBeTruthy();
+    rerender(<SaveStatus status="autosaved" />);
+    expect(screen.getByText("自動保存済み")).toBeTruthy();
+    rerender(<SaveStatus status="autosave-error" />);
+    expect(screen.getByText("自動保存エラー")).toBeTruthy();
+    rerender(<SaveStatus status="recovered" />);
+    expect(screen.getByText("復旧版を編集中")).toBeTruthy();
   });
 });
 
@@ -133,7 +151,11 @@ describe("EditorToolbar", () => {
     );
 
     const toolbar = screen.getByLabelText("書式ツールバー");
-    expect(within(toolbar).getAllByRole("button").map((button) => button.textContent)).toEqual([
+    expect(
+      within(toolbar)
+        .getAllByRole("button")
+        .map((button) => button.textContent),
+    ).toEqual([
       "B",
       "I",
       "U",
@@ -150,14 +172,21 @@ describe("EditorToolbar", () => {
       "箇条",
       "番号",
       "表",
-      "行+",
-      "列+",
+      "行↑",
+      "行↓",
+      "列←",
+      "列→",
       "行-",
       "列-",
+      "表-",
+      "結合",
+      "解除",
+      "H行",
       "画像",
       "図題",
       "表題",
       "改頁",
+      "改頁-",
       "戻",
       "進",
     ]);
@@ -228,16 +257,31 @@ describe("SettingsPanel", () => {
     render(
       <SettingsPanel
         pageSettings={createNewProject().pageSettings}
+        paragraphSettings={createNewProject().paragraphSettings}
+        header={createNewProject().header}
+        footer={createNewProject().footer}
+        tableCellSettings={{ backgroundColor: null, verticalAlign: "top" }}
+        imageSettings={defaultImageSettings}
         userPreferences={preferences}
         preferenceSaveError={null}
         showAdvancedEditingSettings={false}
         canApplyToSelectedBlock={false}
+        canEditSelectedTableCell={false}
+        canEditSelectedImage={false}
+        imageError={null}
         onUpdatePreferences={onUpdatePreferences}
         onUpdateEditingPreferences={onUpdateEditingPreferences}
         onToggleAdvancedEditingSettings={vi.fn()}
         onApplyPreferencesToDocumentDefaults={vi.fn()}
         onApplyPreferencesToSelectedBlock={vi.fn()}
         onUpdatePageSettings={onUpdatePageSettings}
+        onUpdateSelectedParagraphSettings={vi.fn()}
+        onUpdateSelectedTableCellSettings={vi.fn()}
+        onUpdateSelectedImageSettings={vi.fn()}
+        onResetSelectedImageSize={vi.fn()}
+        onDeleteSelectedImage={vi.fn()}
+        onUpdateHeader={vi.fn()}
+        onUpdateFooter={vi.fn()}
       />,
     );
 
@@ -252,9 +296,11 @@ describe("SettingsPanel", () => {
     expect(onUpdatePreferences).toHaveBeenCalledWith({ layout: { sidebarVisible: false } });
     fireEvent.change(screen.getByLabelText("設定パネル位置"), { target: { value: "left" } });
     expect(onUpdatePreferences).toHaveBeenCalledWith({ layout: { settingsPosition: "left" } });
-    expect(screen.getByText("非表示後は上部の設定ボタンまたはCtrl+,で再表示できます。")).toBeTruthy();
+    expect(
+      screen.getByText("非表示後は上部の設定ボタンまたはCtrl+,で再表示できます。"),
+    ).toBeTruthy();
 
-    fireEvent.change(screen.getByLabelText("向き"), { target: { value: "landscape" } });
+    fireEvent.change(screen.getByLabelText("用紙の向き"), { target: { value: "landscape" } });
     expect(onUpdatePageSettings).toHaveBeenCalledWith({ orientation: "landscape" });
 
     fireEvent.click(screen.getByLabelText("段落記号"));
@@ -268,16 +314,31 @@ describe("SettingsPanel", () => {
     render(
       <SettingsPanel
         pageSettings={createNewProject().pageSettings}
+        paragraphSettings={createNewProject().paragraphSettings}
+        header={createNewProject().header}
+        footer={createNewProject().footer}
+        tableCellSettings={{ backgroundColor: null, verticalAlign: "top" }}
+        imageSettings={defaultImageSettings}
         userPreferences={preferences}
         preferenceSaveError={null}
         showAdvancedEditingSettings={false}
         canApplyToSelectedBlock={false}
+        canEditSelectedTableCell={false}
+        canEditSelectedImage={false}
+        imageError={null}
         onUpdatePreferences={onUpdatePreferences}
         onUpdateEditingPreferences={vi.fn()}
         onToggleAdvancedEditingSettings={vi.fn()}
         onApplyPreferencesToDocumentDefaults={vi.fn()}
         onApplyPreferencesToSelectedBlock={vi.fn()}
         onUpdatePageSettings={vi.fn()}
+        onUpdateSelectedParagraphSettings={vi.fn()}
+        onUpdateSelectedTableCellSettings={vi.fn()}
+        onUpdateSelectedImageSettings={vi.fn()}
+        onResetSelectedImageSize={vi.fn()}
+        onDeleteSelectedImage={vi.fn()}
+        onUpdateHeader={vi.fn()}
+        onUpdateFooter={vi.fn()}
       />,
     );
 
@@ -306,6 +367,213 @@ describe("SettingsPanel", () => {
       },
     });
   });
+
+  it("updates page settings and selected paragraph settings from document sections", () => {
+    const project = createNewProject();
+    const onUpdatePageSettings = vi.fn();
+    const onUpdateSelectedParagraphSettings = vi.fn();
+    const onUpdateSelectedTableCellSettings = vi.fn();
+
+    render(
+      <SettingsPanel
+        pageSettings={project.pageSettings}
+        header={project.header}
+        footer={project.footer}
+        tableCellSettings={{ backgroundColor: "#DBEAFE", verticalAlign: "middle" }}
+        imageSettings={{ ...defaultImageSettings, widthPx: 200, heightPx: 100, altText: "図" }}
+        paragraphSettings={{
+          indentLeftMm: 1,
+          indentRightMm: 2,
+          firstLineIndentMm: 3,
+          spaceBeforePt: 4,
+          spaceAfterPt: 5,
+          lineSpacing: { type: "multiple", value: 1.5 },
+        }}
+        userPreferences={getDefaultUserPreferences()}
+        preferenceSaveError={null}
+        showAdvancedEditingSettings={false}
+        canApplyToSelectedBlock={true}
+        canEditSelectedTableCell={true}
+        canEditSelectedImage={true}
+        imageError={null}
+        onUpdatePreferences={vi.fn()}
+        onUpdateEditingPreferences={vi.fn()}
+        onToggleAdvancedEditingSettings={vi.fn()}
+        onApplyPreferencesToDocumentDefaults={vi.fn()}
+        onApplyPreferencesToSelectedBlock={vi.fn()}
+        onUpdatePageSettings={onUpdatePageSettings}
+        onUpdateSelectedParagraphSettings={onUpdateSelectedParagraphSettings}
+        onUpdateSelectedTableCellSettings={onUpdateSelectedTableCellSettings}
+        onUpdateSelectedImageSettings={vi.fn()}
+        onResetSelectedImageSize={vi.fn()}
+        onDeleteSelectedImage={vi.fn()}
+        onUpdateHeader={vi.fn()}
+        onUpdateFooter={vi.fn()}
+      />,
+    );
+
+    fireEvent.change(screen.getByLabelText("用紙サイズ"), { target: { value: "Letter" } });
+    expect(onUpdatePageSettings).toHaveBeenCalledWith({ size: "Letter" });
+    fireEvent.change(screen.getByLabelText("上余白 mm"), { target: { value: "12" } });
+    expect(onUpdatePageSettings).toHaveBeenCalledWith({
+      margins: { ...project.pageSettings.margins, topMm: 12 },
+    });
+    fireEvent.change(screen.getByLabelText("左インデント mm"), { target: { value: "10" } });
+    expect(onUpdateSelectedParagraphSettings).toHaveBeenCalledWith({ indentLeftMm: 10 });
+    fireEvent.change(screen.getByLabelText("段落間隔 Before"), { target: { value: "6" } });
+    expect(onUpdateSelectedParagraphSettings).toHaveBeenCalledWith({ spaceBeforePt: 6 });
+    fireEvent.change(screen.getByLabelText("段落行間"), { target: { value: "2" } });
+    expect(onUpdateSelectedParagraphSettings).toHaveBeenCalledWith({
+      lineSpacing: { type: "multiple", value: 2 },
+    });
+    fireEvent.change(screen.getByLabelText("セル背景色"), { target: { value: "#FEE2E2" } });
+    expect(onUpdateSelectedTableCellSettings).toHaveBeenCalledWith({
+      backgroundColor: "#FEE2E2",
+    });
+    fireEvent.change(screen.getByLabelText("セル縦方向配置"), { target: { value: "bottom" } });
+    expect(onUpdateSelectedTableCellSettings).toHaveBeenCalledWith({ verticalAlign: "bottom" });
+  });
+
+  it("disables table cell settings outside a table", () => {
+    const project = createNewProject();
+
+    render(
+      <SettingsPanel
+        pageSettings={project.pageSettings}
+        paragraphSettings={project.paragraphSettings}
+        header={project.header}
+        footer={project.footer}
+        tableCellSettings={{ backgroundColor: null, verticalAlign: "top" }}
+        imageSettings={defaultImageSettings}
+        userPreferences={getDefaultUserPreferences()}
+        preferenceSaveError={null}
+        showAdvancedEditingSettings={false}
+        canApplyToSelectedBlock={false}
+        canEditSelectedTableCell={false}
+        canEditSelectedImage={false}
+        imageError={null}
+        onUpdatePreferences={vi.fn()}
+        onUpdateEditingPreferences={vi.fn()}
+        onToggleAdvancedEditingSettings={vi.fn()}
+        onApplyPreferencesToDocumentDefaults={vi.fn()}
+        onApplyPreferencesToSelectedBlock={vi.fn()}
+        onUpdatePageSettings={vi.fn()}
+        onUpdateSelectedParagraphSettings={vi.fn()}
+        onUpdateSelectedTableCellSettings={vi.fn()}
+        onUpdateSelectedImageSettings={vi.fn()}
+        onResetSelectedImageSize={vi.fn()}
+        onDeleteSelectedImage={vi.fn()}
+        onUpdateHeader={vi.fn()}
+        onUpdateFooter={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByLabelText<HTMLSelectElement>("セル背景色").disabled).toBe(true);
+    expect(screen.getByLabelText<HTMLSelectElement>("セル縦方向配置").disabled).toBe(true);
+  });
+
+  it("updates selected image settings and actions", () => {
+    const project = createNewProject();
+    const onUpdateSelectedImageSettings = vi.fn();
+    const onResetSelectedImageSize = vi.fn();
+    const onDeleteSelectedImage = vi.fn();
+
+    render(
+      <SettingsPanel
+        pageSettings={project.pageSettings}
+        paragraphSettings={project.paragraphSettings}
+        header={project.header}
+        footer={project.footer}
+        tableCellSettings={{ backgroundColor: null, verticalAlign: "top" }}
+        imageSettings={{
+          ...defaultImageSettings,
+          widthPx: 240,
+          heightPx: 120,
+          alignment: "center",
+          altText: "画像",
+        }}
+        userPreferences={getDefaultUserPreferences()}
+        preferenceSaveError={null}
+        showAdvancedEditingSettings={false}
+        canApplyToSelectedBlock={false}
+        canEditSelectedTableCell={false}
+        canEditSelectedImage={true}
+        imageError={null}
+        onUpdatePreferences={vi.fn()}
+        onUpdateEditingPreferences={vi.fn()}
+        onToggleAdvancedEditingSettings={vi.fn()}
+        onApplyPreferencesToDocumentDefaults={vi.fn()}
+        onApplyPreferencesToSelectedBlock={vi.fn()}
+        onUpdatePageSettings={vi.fn()}
+        onUpdateSelectedParagraphSettings={vi.fn()}
+        onUpdateSelectedTableCellSettings={vi.fn()}
+        onUpdateSelectedImageSettings={onUpdateSelectedImageSettings}
+        onResetSelectedImageSize={onResetSelectedImageSize}
+        onDeleteSelectedImage={onDeleteSelectedImage}
+        onUpdateHeader={vi.fn()}
+        onUpdateFooter={vi.fn()}
+      />,
+    );
+
+    fireEvent.change(screen.getByLabelText("画像幅 px"), { target: { value: "320" } });
+    expect(onUpdateSelectedImageSettings).toHaveBeenCalledWith({ widthPx: 320 });
+    fireEvent.click(screen.getByLabelText("画像の縦横比を維持"));
+    expect(onUpdateSelectedImageSettings).toHaveBeenCalledWith({ keepAspectRatio: false });
+    fireEvent.change(screen.getByLabelText("画像配置"), { target: { value: "right" } });
+    expect(onUpdateSelectedImageSettings).toHaveBeenCalledWith({ alignment: "right" });
+    fireEvent.change(screen.getByLabelText("画像代替テキスト"), { target: { value: "説明" } });
+    expect(onUpdateSelectedImageSettings).toHaveBeenCalledWith({ altText: "説明" });
+    fireEvent.click(screen.getByText("元のサイズに戻す"));
+    expect(onResetSelectedImageSize).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByText("画像を削除"));
+    expect(onDeleteSelectedImage).toHaveBeenCalledTimes(1);
+  });
+
+  it("renders independent header and footer editors and updates page number position", () => {
+    const project = createNewProject();
+    const onUpdateFooter = vi.fn();
+
+    render(
+      <SettingsPanel
+        pageSettings={project.pageSettings}
+        paragraphSettings={project.paragraphSettings}
+        header={{ ...project.header, plainText: "Header text" }}
+        footer={{ ...project.footer, plainText: "Footer text", pageNumberPosition: "none" }}
+        tableCellSettings={{ backgroundColor: null, verticalAlign: "top" }}
+        imageSettings={defaultImageSettings}
+        userPreferences={getDefaultUserPreferences()}
+        preferenceSaveError={null}
+        showAdvancedEditingSettings={false}
+        canApplyToSelectedBlock={true}
+        canEditSelectedTableCell={false}
+        canEditSelectedImage={false}
+        imageError={null}
+        onUpdatePreferences={vi.fn()}
+        onUpdateEditingPreferences={vi.fn()}
+        onToggleAdvancedEditingSettings={vi.fn()}
+        onApplyPreferencesToDocumentDefaults={vi.fn()}
+        onApplyPreferencesToSelectedBlock={vi.fn()}
+        onUpdatePageSettings={vi.fn()}
+        onUpdateSelectedParagraphSettings={vi.fn()}
+        onUpdateSelectedTableCellSettings={vi.fn()}
+        onUpdateSelectedImageSettings={vi.fn()}
+        onResetSelectedImageSize={vi.fn()}
+        onDeleteSelectedImage={vi.fn()}
+        onUpdateHeader={vi.fn()}
+        onUpdateFooter={onUpdateFooter}
+      />,
+    );
+
+    expect(screen.getByLabelText("Header editor")).toBeTruthy();
+    expect(screen.getByLabelText("Footer editor")).toBeTruthy();
+    fireEvent.change(screen.getByLabelText("ページ番号"), { target: { value: "right" } });
+
+    expect(onUpdateFooter).toHaveBeenCalledWith({
+      ...project.footer,
+      plainText: "Footer text",
+      pageNumberPosition: "right",
+    });
+  });
 });
 
 function createEditorMock(): {
@@ -325,11 +593,18 @@ function createEditorMock(): {
     "toggleBulletList",
     "toggleOrderedList",
     "insertTable",
+    "addRowBefore",
     "addRowAfter",
+    "addColumnBefore",
     "addColumnAfter",
     "deleteRow",
     "deleteColumn",
+    "deleteTable",
+    "mergeCells",
+    "splitCell",
+    "toggleHeaderRow",
     "insertContent",
+    "deletePageBreak",
     "undo",
     "redo",
   ];

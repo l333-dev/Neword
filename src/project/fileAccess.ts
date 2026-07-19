@@ -4,7 +4,34 @@ import { open, save } from "@tauri-apps/plugin-dialog";
 import type { DocumentProject } from "../document-model/schema";
 import { deserializeProject, serializeProject } from "./serialization";
 
-export type SaveStatus = "saved" | "dirty" | "saving" | "error";
+export type SaveStatus =
+  | "saved"
+  | "dirty"
+  | "saving"
+  | "error"
+  | "autosave-pending"
+  | "autosaving"
+  | "autosaved"
+  | "autosave-error"
+  | "recovered";
+
+export const PROJECT_BACKUP_LIMIT = 5;
+
+export type FileCommandError = {
+  code: string;
+  operation: string;
+  path: string | null;
+  retryable: boolean;
+  human_readable_message: string;
+  technical_cause: string | null;
+};
+
+export type RecoveryFileInfo = {
+  name: string;
+  path: string;
+  modified_millis: number | null;
+  byte_size: number;
+};
 
 export type DocxEntryInfo = {
   name: string;
@@ -25,6 +52,16 @@ export type DocxImageRelationship = {
   checksum: string | null;
   warning_code: string | null;
   warning_message: string | null;
+};
+
+export type DocxImageWarning = {
+  code: string;
+  message: string;
+  severity: "info" | "warning" | "error";
+  relationship_id: string | null;
+  part: string | null;
+  position: number | null;
+  simplified: string | null;
 };
 
 export type DocxPageMargins = {
@@ -52,6 +89,18 @@ export type DocxSection = {
   has_columns: boolean;
   has_page_borders: boolean;
   has_title_page: boolean;
+  header_references?: string[];
+  footer_references?: string[];
+};
+
+export type DocxHeaderFooter = {
+  kind: "header" | "footer";
+  reference_type: string;
+  relationship_id: string | null;
+  source_part: string | null;
+  text: string;
+  has_page_number: boolean;
+  unsupported_features: string[];
 };
 
 export type DocxParagraphFormatting = {
@@ -70,6 +119,18 @@ export type DocxParagraphFormatting = {
   keep_lines: boolean;
   widow_control: boolean | null;
   has_page_break: boolean;
+  has_rendered_page_break?: boolean;
+  has_column_break?: boolean;
+};
+
+export type DocxTableWarning = {
+  code: string;
+  message: string;
+  severity: "info" | "warning" | "error";
+  table_index: number;
+  row_index: number | null;
+  cell_index: number | null;
+  simplified: string | null;
 };
 
 export type DocxInspection = {
@@ -80,10 +141,14 @@ export type DocxInspection = {
   has_headers: boolean;
   has_footers: boolean;
   has_macros: boolean;
+  headers: DocxHeaderFooter[];
+  footers: DocxHeaderFooter[];
   media_entries: string[];
   image_relationships: DocxImageRelationship[];
+  image_warnings: DocxImageWarning[];
   sections: DocxSection[];
   paragraphs: DocxParagraphFormatting[];
+  table_warnings: DocxTableWarning[];
   entries: DocxEntryInfo[];
   warnings: string[];
 };
@@ -95,6 +160,16 @@ export type OpenDocxResult = {
   inspection: DocxInspection;
 };
 
+export type OpenImageResult = {
+  path: string;
+  name: string;
+  base64: string;
+};
+
+function fileNameFromPath(path: string): string {
+  return path.split(/[\\/]/).at(-1) ?? "image";
+}
+
 export async function saveProjectWithDialog(project: DocumentProject): Promise<string | null> {
   const path = await save({
     title: "プロジェクトを保存",
@@ -102,15 +177,42 @@ export async function saveProjectWithDialog(project: DocumentProject): Promise<s
     filters: [{ name: "Document Project", extensions: ["json"] }],
   });
   if (!path) return null;
-  await invoke("write_text_file_atomic", { path, contents: serializeProject(project) });
+  await invoke("write_text_file_atomic_with_backup", {
+    path,
+    contents: serializeProject(project),
+    backupLimit: PROJECT_BACKUP_LIMIT,
+  });
   return path;
 }
 
 export async function saveProjectToPath(path: string, project: DocumentProject): Promise<void> {
-  await invoke("write_text_file_atomic", { path, contents: serializeProject(project) });
+  await invoke("write_text_file_atomic_with_backup", {
+    path,
+    contents: serializeProject(project),
+    backupLimit: PROJECT_BACKUP_LIMIT,
+  });
 }
 
-export async function openProjectWithDialog(): Promise<{ path: string; project: DocumentProject } | null> {
+export async function writeProjectAutosave(name: string, contents: string): Promise<string> {
+  return invoke<string>("write_recovery_file", { name, contents });
+}
+
+export async function listRecoveryFiles(): Promise<RecoveryFileInfo[]> {
+  return invoke<RecoveryFileInfo[]>("list_recovery_files");
+}
+
+export async function readRecoveryFile(name: string): Promise<string> {
+  return invoke<string>("read_recovery_file", { name });
+}
+
+export async function deleteRecoveryFile(name: string): Promise<void> {
+  await invoke("delete_recovery_file", { name });
+}
+
+export async function openProjectWithDialog(): Promise<{
+  path: string;
+  project: DocumentProject;
+} | null> {
   const path = await open({
     title: "プロジェクトを開く",
     multiple: false,
@@ -139,7 +241,21 @@ export async function openDocxWithDialog(): Promise<OpenDocxResult | null> {
   };
 }
 
-export async function writeBinaryFileWithDialog(defaultName: string, base64: string): Promise<string | null> {
+export async function openImageWithDialog(): Promise<OpenImageResult | null> {
+  const path = await open({
+    title: "画像を挿入",
+    multiple: false,
+    filters: [{ name: "Images", extensions: ["png", "jpg", "jpeg", "gif", "webp"] }],
+  });
+  if (!path || Array.isArray(path)) return null;
+  const base64 = await invoke<string>("read_binary_file_base64", { path });
+  return { path, name: fileNameFromPath(path), base64 };
+}
+
+export async function writeBinaryFileWithDialog(
+  defaultName: string,
+  base64: string,
+): Promise<string | null> {
   const path = await save({
     title: "DOCXを書き出す",
     defaultPath: defaultName,

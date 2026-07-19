@@ -1,13 +1,32 @@
-import { defaultDocumentDefaults, parseDocumentProject, type DocumentProject } from "./schema";
+import {
+  defaultDocumentDefaults,
+  defaultFooter,
+  defaultHeader,
+  defaultParagraphSettings,
+  emptyHeaderFooterDocument,
+  parseDocumentProject,
+  type DocumentProject,
+} from "./schema";
+
+const DEFAULT_PARAGRAPH_LINE_HEIGHT = 1.5;
+const DEFAULT_PARAGRAPH_SPACE_BEFORE_PT = 0;
+const DEFAULT_PARAGRAPH_SPACE_AFTER_PT = 6;
 
 export function migrateDocumentProject(value: unknown): DocumentProject {
   if (typeof value === "object" && value !== null) {
     const versioned = value as Record<string, unknown>;
-    if (versioned.formatVersion === 1 || versioned.formatVersion === 2) {
-      versioned.formatVersion = 3;
+    if (
+      versioned.formatVersion === 1 ||
+      versioned.formatVersion === 2 ||
+      versioned.formatVersion === 3 ||
+      versioned.formatVersion === 4
+    ) {
+      versioned.formatVersion = 5;
     }
     migratePageSettings(versioned);
     migrateDocumentDefaults(versioned);
+    migrateParagraphSettings(versioned);
+    migrateHeaderFooter(versioned);
     const candidate = value as {
       warnings?: unknown;
     };
@@ -45,6 +64,88 @@ export function migrateDocumentProject(value: unknown): DocumentProject {
     }
   }
   return parseDocumentProject(value);
+}
+
+function migrateHeaderFooter(project: Record<string, unknown>): void {
+  const pageSettings =
+    typeof project.pageSettings === "object" && project.pageSettings !== null
+      ? (project.pageSettings as Record<string, unknown>)
+      : {};
+  if (typeof project.header !== "object" || project.header === null) {
+    const plainText = typeof pageSettings.header === "string" ? pageSettings.header : "";
+    project.header = {
+      ...defaultHeader,
+      editorContent: plainTextToTiptapDocument(plainText),
+      plainText,
+      importMetadata: {
+        source: plainText.length > 0 ? "migrated" : "new",
+        warnings: [],
+      },
+    };
+  }
+  if (typeof project.footer !== "object" || project.footer === null) {
+    const plainText = typeof pageSettings.footer === "string" ? pageSettings.footer : "";
+    project.footer = {
+      ...defaultFooter,
+      editorContent: plainTextToTiptapDocument(plainText),
+      plainText,
+      importMetadata: {
+        source: plainText.length > 0 ? "migrated" : "new",
+        warnings: [],
+      },
+      pageNumberPosition: pageSettings.pageNumbers === true ? "center" : "none",
+    };
+  }
+}
+
+function plainTextToTiptapDocument(plainText: string): unknown {
+  if (plainText.length === 0) return emptyHeaderFooterDocument;
+  return {
+    type: "doc",
+    content: [
+      {
+        type: "paragraph",
+        content: [{ type: "text", text: plainText }],
+      },
+    ],
+  };
+}
+
+function migrateParagraphSettings(project: Record<string, unknown>): void {
+  if (typeof project.paragraphSettings === "object" && project.paragraphSettings !== null) return;
+  const documentDefaults =
+    typeof project.documentDefaults === "object" && project.documentDefaults !== null
+      ? (project.documentDefaults as Record<string, unknown>)
+      : {};
+  const bodyParagraph =
+    typeof documentDefaults.bodyParagraph === "object" && documentDefaults.bodyParagraph !== null
+      ? (documentDefaults.bodyParagraph as Record<string, unknown>)
+      : {};
+  const pageSettings =
+    typeof project.pageSettings === "object" && project.pageSettings !== null
+      ? (project.pageSettings as Record<string, unknown>)
+      : {};
+
+  const lineHeight = numberOrDefault(
+    bodyParagraph.lineHeight,
+    numberOrDefault(pageSettings.lineHeight, DEFAULT_PARAGRAPH_LINE_HEIGHT),
+  );
+
+  project.paragraphSettings = {
+    ...defaultParagraphSettings,
+    spaceBeforePt: numberOrDefault(
+      bodyParagraph.spacingBeforePt,
+      numberOrDefault(pageSettings.paragraphSpacingBeforePt, DEFAULT_PARAGRAPH_SPACE_BEFORE_PT),
+    ),
+    spaceAfterPt: numberOrDefault(
+      bodyParagraph.spacingAfterPt,
+      numberOrDefault(pageSettings.paragraphSpacingAfterPt, DEFAULT_PARAGRAPH_SPACE_AFTER_PT),
+    ),
+    lineSpacing: {
+      type: "multiple",
+      value: lineHeight,
+    },
+  };
 }
 
 function migrateDocumentDefaults(project: Record<string, unknown>): void {

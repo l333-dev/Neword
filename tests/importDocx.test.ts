@@ -65,6 +65,34 @@ describe("DOCX import preview blocks", () => {
     expect(document.stats.imageCount).toBe(0);
     expect(document.stats.retainedImageCount).toBe(0);
   });
+
+  it("keeps explicit page break metadata from sanitized HTML", () => {
+    const html = sanitizeImportHtml(
+      '<p>前</p><div data-page-break="true" data-break-type="sectionNextPage" data-source="docx" data-imported-from="w:sectPr" data-section-metadata="{&quot;originalBreakType&quot;:&quot;nextPage&quot;}"></div><p>後</p>',
+    );
+    const document = importDocumentFromHtml(html);
+
+    expect(document.sanitizedHtml).toContain('data-break-type="sectionNextPage"');
+    expect(document.sanitizedHtml).toContain('data-imported-from="w:sectPr"');
+    expect(document.blocks[1]?.classification.blockType).toBe("page_break");
+  });
+
+  it("keeps supported table attributes while sanitizing imported HTML", () => {
+    const html = sanitizeImportHtml(
+      '<table style="width:500px"><tr><th colspan="2" bgcolor="#dbeafe" valign="middle" style="width:120px;background-color:#dbeafe;vertical-align:middle">見出し</th></tr><tr><td rowspan="2" style="width:80px;background-color:rgb(254, 226, 226);vertical-align:bottom">本文</td></tr></table>',
+    );
+
+    expect(html).toContain('data-table-width-px="500"');
+    expect(html).toContain('colspan="2"');
+    expect(html).toContain('rowspan="2"');
+    expect(html).toContain('colwidth="120"');
+    expect(html).toContain('colwidth="80"');
+    expect(html).toContain('data-cell-background="#DBEAFE"');
+    expect(html).toContain('data-cell-background="#FEE2E2"');
+    expect(html).toContain('data-cell-vertical-align="middle"');
+    expect(html).toContain('data-cell-vertical-align="bottom"');
+    expect(html).not.toContain("style=");
+  });
 });
 
 describe("DOCX fixture import", () => {
@@ -92,13 +120,78 @@ describe("DOCX fixture import", () => {
     expect(result.warnings.map((warning) => warning.code)).toContain("docx.unsupported_drawing");
   });
 
+  it("converts table inspection metadata into ImportWarning", async () => {
+    const buffer = await readFile(fixturePath);
+    const inspection = await inspectFixture(buffer);
+    inspection.table_warnings = [
+      {
+        code: "table.nested_unsupported",
+        message: "入れ子になった表は単純化されます。",
+        severity: "warning",
+        table_index: 0,
+        row_index: 1,
+        cell_index: 2,
+        simplified: "nested table structure is not preserved",
+      },
+    ];
+    const bytes = new Uint8Array(buffer);
+    const result = await convertDocxArrayBufferToImportResult({
+      arrayBuffer: bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength),
+      sourceInfo: sourceInfo(buffer.byteLength),
+      inspection,
+    });
+
+    expect(result.warnings).toContainEqual(
+      expect.objectContaining({
+        code: "table.nested_unsupported",
+        location: "table:0 row:1 cell:2",
+        fallbackValue: "nested table structure is not preserved",
+      }),
+    );
+  });
+
+  it("converts image inspection metadata into ImportWarning", async () => {
+    const buffer = await readFile(fixturePath);
+    const inspection = await inspectFixture(buffer);
+    inspection.image_warnings = [
+      {
+        code: "image.anchored_unsupported",
+        message: "anchored imageは通常の画像配置へ単純化します。",
+        severity: "warning",
+        relationship_id: "rIdImage",
+        part: "word/document.xml",
+        position: 0,
+        simplified: "anchor positioning and wrapping are ignored",
+      },
+    ];
+    const bytes = new Uint8Array(buffer);
+    const result = await convertDocxArrayBufferToImportResult({
+      arrayBuffer: bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength),
+      sourceInfo: sourceInfo(buffer.byteLength),
+      inspection,
+    });
+
+    expect(result.warnings).toContainEqual(
+      expect.objectContaining({
+        code: "image.anchored_unsupported",
+        location: "relationship:rIdImage",
+        part: "word/document.xml",
+        fallbackValue: "anchor positioning and wrapping are ignored",
+      }),
+    );
+  });
+
   it("creates an image asset from a PNG DOCX image", async () => {
     const result = await importFixture(pngFixturePath);
 
     expect(result.assets).toHaveLength(1);
     expect(result.assets[0]?.mimeType).toBe("image/png");
     expect(result.assets[0]?.fileName).toBe("日本語画像.png");
+    expect(result.assets[0]?.originalWidthPx).toBeGreaterThan(0);
+    expect(result.assets[0]?.originalHeightPx).toBeGreaterThan(0);
     expect(result.document.sanitizedHtml).toContain("data-asset-id=");
+    expect(result.document.sanitizedHtml).toContain("data-width-px=");
+    expect(result.document.sanitizedHtml).toContain("data-height-px=");
   });
 
   it("creates an image asset from a JPEG DOCX image", async () => {
@@ -235,11 +328,87 @@ describe("DOCX fixture import", () => {
     expect(result.pageSettings.orientation).toBe("landscape");
     expect(result.pageSettings.widthMm).toBeCloseTo(297, 0);
     expect(result.pageSettings.margins.leftMm).toBeCloseTo(15, 0);
+    expect(result.paragraphSettings.alignment).toBe("justify");
+    expect(result.paragraphSettings.indentLeftMm).toBeCloseTo(10, 0);
+    expect(result.paragraphSettings.indentRightMm).toBeCloseTo(5, 0);
+    expect(result.paragraphSettings.hangingIndentMm).toBeCloseTo(3, 0);
+    expect(result.paragraphSettings.spaceBeforePt).toBe(6);
+    expect(result.paragraphSettings.spaceAfterPt).toBe(12);
+    expect(result.paragraphSettings.lineSpacing).toEqual({ type: "multiple", value: 1.5 });
+    expect(result.paragraphSettings.pageBreakBefore).toBe(true);
+    expect(result.paragraphSettings.keepWithNext).toBe(true);
+    expect(result.paragraphSettings.keepLinesTogether).toBe(true);
     expect(result.document.sanitizedHtml).toContain('data-page-break="true"');
     expect(result.document.sanitizedHtml).toContain("data-paragraph-formatting=");
     expect(result.document.sanitizedHtml).toContain("text-align: justify");
     expect(result.warnings.map((item) => item.code)).toContain("PARAGRAPH_SPACING_SIMPLIFIED");
     expect(result.warnings.map((item) => item.code)).toContain("paragraph.formatting_loss");
+  });
+
+  it("imports inspected header, footer, and page number metadata", async () => {
+    const buffer = await readFile(fixturePath);
+    const inspection = await inspectFixture(buffer);
+    inspection.headers = [
+      {
+        kind: "header",
+        reference_type: "default",
+        relationship_id: "rIdHeader1",
+        source_part: "word/header1.xml",
+        text: "Imported Header",
+        has_page_number: false,
+        unsupported_features: [],
+      },
+      {
+        kind: "header",
+        reference_type: "first",
+        relationship_id: "rIdHeaderFirst",
+        source_part: "word/header2.xml",
+        text: "First Header",
+        has_page_number: false,
+        unsupported_features: ["drawing"],
+      },
+    ];
+    inspection.footers = [
+      {
+        kind: "footer",
+        reference_type: "default",
+        relationship_id: "rIdFooter1",
+        source_part: "word/footer1.xml",
+        text: "Imported Footer",
+        has_page_number: true,
+        unsupported_features: [],
+      },
+      {
+        kind: "footer",
+        reference_type: "even",
+        relationship_id: "rIdFooterEven",
+        source_part: "word/footer2.xml",
+        text: "Even Footer",
+        has_page_number: false,
+        unsupported_features: ["field"],
+      },
+    ];
+    const bytes = new Uint8Array(buffer);
+    const result = await convertDocxArrayBufferToImportResult({
+      arrayBuffer: bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength),
+      sourceInfo: sourceInfo(buffer.byteLength),
+      inspection,
+    });
+
+    expect(result.header.plainText).toBe("Imported Header");
+    expect(result.header.importMetadata.sourcePart).toBe("word/header1.xml");
+    expect(result.footer.plainText).toBe("Imported Footer");
+    expect(result.footer.pageNumberPosition).toBe("center");
+    expect(result.warnings.map((item) => item.code)).toEqual(
+      expect.arrayContaining([
+        "header.multiple_types",
+        "header.first_page_unsupported",
+        "header.word_feature_unsupported",
+        "footer.multiple_types",
+        "footer.even_odd_unsupported",
+        "footer.word_feature_unsupported",
+      ]),
+    );
   });
 
   it("warns about multiple sections and unsupported section decorations", async () => {
@@ -307,6 +476,7 @@ describe("DOCX fixture import", () => {
       altText: "図1",
       widthPx: 24,
       heightPx: 24,
+      alignment: "left",
     });
   });
 
@@ -442,10 +612,14 @@ async function inspectFixture(buffer: Buffer): Promise<DocxInspection> {
     has_headers: names.some((name) => /^word\/header.*\.xml$/.test(name)),
     has_footers: names.some((name) => /^word\/footer.*\.xml$/.test(name)),
     has_macros: names.includes("word/vbaProject.bin"),
+    headers: [],
+    footers: [],
     media_entries: names.filter((name) => name.startsWith("word/media/")),
     image_relationships: imageRelationships,
+    image_warnings: [],
     sections: [],
     paragraphs: [],
+    table_warnings: [],
     entries,
     warnings: [],
   };

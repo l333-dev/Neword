@@ -1,24 +1,29 @@
 import {
   AlignmentType,
   Document,
+  Footer,
+  Header,
   HeadingLevel,
   ImageRun,
   LineRuleType,
   Packer,
   PageBreak,
+  PageNumber,
   PageOrientation,
   Paragraph,
+  ShadingType,
   Table,
   TableCell,
   TableRow,
   TextRun,
+  VerticalAlignTable,
   WidthType,
   type IParagraphOptions,
 } from "docx";
 
-import { millimetersToTwips, pointsToTwips } from "../../converters/units";
+import { millimetersToTwips, pixelsToTwips, pointsToTwips } from "../../converters/units";
 import type { DocumentDefaults, ParagraphFormatting } from "../../document-model/schema";
-import type { ExportBlock, ExportDocument, ExportInline } from "./exportDocument";
+import type { ExportBlock, ExportDocument, ExportInline, ExportTableCell } from "./exportDocument";
 
 type ExportParagraphBlock = Extract<ExportBlock, { type: "heading" | "paragraph" }>;
 
@@ -175,21 +180,24 @@ function blockToDocx(block: ExportBlock, exportDocument: ExportDocument): Paragr
   }
   if (block.type === "table") {
     return new Table({
-      width: { size: 100, type: WidthType.PERCENTAGE },
+      width:
+        block.tableWidthPx === undefined
+          ? { size: 100, type: WidthType.PERCENTAGE }
+          : { size: pixelsToTwips(block.tableWidthPx), type: WidthType.DXA },
+      columnWidths: columnWidthsFromRows(block.rows),
       rows: block.rows.map(
         (row) =>
           new TableRow({
-            children: row.map(
-              (cell) =>
-                new TableCell({
-                  children: [new Paragraph({ children: runs(cell) })],
-                }),
-            ),
+            tableHeader: row.some((cell) => cell.header) || undefined,
+            children: row.map((cell) => tableCellToDocx(cell)),
           }),
       ),
     });
   }
   if (block.type === "page_break") {
+    if (block.breakType === "sectionContinuous") {
+      return new Paragraph({});
+    }
     return new Paragraph({ children: [new PageBreak()] });
   }
   if (block.type === "image") {
@@ -204,6 +212,7 @@ function blockToDocx(block: ExportBlock, exportDocument: ExportDocument): Paragr
       heightPx: block.heightPx ?? asset.heightPx,
     });
     return new Paragraph({
+      alignment: alignment(block.alignment),
       children: [
         new ImageRun({
           type,
@@ -223,11 +232,102 @@ function blockToDocx(block: ExportBlock, exportDocument: ExportDocument): Paragr
   });
 }
 
+function tableCellToDocx(cell: ExportTableCell): TableCell {
+  const widthPx = cell.colwidth.reduce((sum, width) => sum + width, 0);
+  return new TableCell({
+    columnSpan: cell.colspan > 1 ? cell.colspan : undefined,
+    rowSpan: cell.rowspan > 1 ? cell.rowspan : undefined,
+    width: widthPx > 0 ? { size: pixelsToTwips(widthPx), type: WidthType.DXA } : undefined,
+    shading: cell.backgroundColor
+      ? { fill: cell.backgroundColor.replace("#", ""), type: ShadingType.CLEAR, color: "auto" }
+      : undefined,
+    verticalAlign: tableVerticalAlign(cell.verticalAlign),
+    children: cell.paragraphs.map((paragraph) => new Paragraph({ children: runs(paragraph) })),
+  });
+}
+
+function tableVerticalAlign(
+  value: ExportTableCell["verticalAlign"],
+): (typeof VerticalAlignTable)[keyof typeof VerticalAlignTable] | undefined {
+  if (value === "middle") return VerticalAlignTable.CENTER;
+  if (value === "bottom") return VerticalAlignTable.BOTTOM;
+  if (value === "top") return VerticalAlignTable.TOP;
+  return undefined;
+}
+
+function columnWidthsFromRows(rows: ExportTableCell[][]): number[] | undefined {
+  const widths: number[] = [];
+  for (const row of rows) {
+    let columnIndex = 0;
+    for (const cell of row) {
+      if (cell.colwidth.length > 0) {
+        for (const width of cell.colwidth) {
+          widths[columnIndex] = Math.max(widths[columnIndex] ?? 0, pixelsToTwips(width));
+          columnIndex += 1;
+        }
+      } else {
+        columnIndex += cell.colspan;
+      }
+    }
+  }
+  const normalized = widths.filter((width) => Number.isFinite(width) && width > 0);
+  return normalized.length > 0 ? normalized : undefined;
+}
+
+function headerFromExportDocument(exportDocument: ExportDocument): Header | undefined {
+  if (exportDocument.header.plainText.trim().length === 0) return undefined;
+  return new Header({
+    children: plainTextParagraphs(exportDocument.header.plainText, AlignmentType.CENTER),
+  });
+}
+
+function footerFromExportDocument(exportDocument: ExportDocument): Footer | undefined {
+  const text = exportDocument.footer.plainText.trim();
+  const pageNumberPosition = exportDocument.footer.pageNumberPosition;
+  if (text.length === 0 && pageNumberPosition === "none") return undefined;
+  const children = text.length > 0 ? plainTextParagraphs(text, AlignmentType.CENTER) : [];
+  if (pageNumberPosition !== "none") {
+    children.push(
+      new Paragraph({
+        alignment: pageNumberAlignment(pageNumberPosition),
+        children: [new TextRun({ children: [PageNumber.CURRENT] })],
+      }),
+    );
+  }
+  return new Footer({ children });
+}
+
+function plainTextParagraphs(
+  plainText: string,
+  paragraphAlignment: (typeof AlignmentType)[keyof typeof AlignmentType],
+): Paragraph[] {
+  const lines = plainText.split(/\r?\n/);
+  return (lines.length > 0 ? lines : [""]).map(
+    (line) =>
+      new Paragraph({
+        alignment: paragraphAlignment,
+        children: [new TextRun(line)],
+      }),
+  );
+}
+
+function pageNumberAlignment(
+  position: ExportDocument["footer"]["pageNumberPosition"],
+): (typeof AlignmentType)[keyof typeof AlignmentType] {
+  if (position === "left") return AlignmentType.LEFT;
+  if (position === "right") return AlignmentType.RIGHT;
+  return AlignmentType.CENTER;
+}
+
 export async function exportDocumentToDocxBase64(exportDocument: ExportDocument): Promise<string> {
   const margins = exportDocument.pageSettings.margins;
+  const header = headerFromExportDocument(exportDocument);
+  const footer = footerFromExportDocument(exportDocument);
   const document = new Document({
     sections: [
       {
+        headers: header ? { default: header } : undefined,
+        footers: footer ? { default: footer } : undefined,
         properties: {
           page: {
             size: {

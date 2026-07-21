@@ -44,7 +44,10 @@ const darkPalette: ThemePalette = {
   borderColor: "#3a414a",
 };
 
-export function resolveColorMode(colorMode: UserPreferences["appearance"]["colorMode"], prefersDark: boolean): ResolvedColorMode {
+export function resolveColorMode(
+  colorMode: UserPreferences["appearance"]["colorMode"],
+  prefersDark: boolean,
+): ResolvedColorMode {
   if (colorMode === "dark") return "dark";
   if (colorMode === "light") return "light";
   return prefersDark ? "dark" : "light";
@@ -70,7 +73,9 @@ export function createAccentPalette(color: string): {
   };
 }
 
-export function editorMaxWidthToCss(value: UserPreferences["appearance"]["editorMaxWidth"]): string {
+export function editorMaxWidthToCss(
+  value: UserPreferences["appearance"]["editorMaxWidth"],
+): string {
   return value === null ? "none" : `${value}px`;
 }
 
@@ -151,7 +156,8 @@ function adjustHexColor(color: string, amount: number): string {
 function mixHexColor(color: string, target: string, targetRatio: number): string {
   const from = hexToRgb(color);
   const to = hexToRgb(target);
-  const mix = (a: number, b: number) => clamp(Math.round(a * (1 - targetRatio) + b * targetRatio), 0, 255);
+  const mix = (a: number, b: number) =>
+    clamp(Math.round(a * (1 - targetRatio) + b * targetRatio), 0, 255);
   return rgbToHex(mix(from.r, to.r), mix(from.g, to.g), mix(from.b, to.b));
 }
 

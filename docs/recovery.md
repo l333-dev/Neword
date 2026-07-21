@@ -42,7 +42,11 @@ Errors are returned as structured values with `code`, `operation`, `path`, `retr
 
 On startup the app lists autosave recovery files, validates each envelope, and compares the content hash and timestamps with the currently loaded project. Candidates are classified as newer, same content, older, or corrupted. Corrupted candidates are shown but cannot be opened.
 
-The recovery UI never overwrites the normal project file automatically. Opening a recovery candidate loads it into the editor as a recovered, unsaved project.
+The home screen and the in-editor recovery panel show valid and corrupted recovery candidates. Each candidate displays the document title when available, autosave time, original project path, recovery file path, byte size, and validation state.
+
+The recovery UI never overwrites the normal project file automatically. Opening a recovery candidate loads it into the editor as a recovered, unsaved project with no active save path. The user must explicitly save or save as before the recovered content replaces any normal project file.
+
+Corrupted recovery files are still listed with their file path. They can be deleted from the UI, but their document contents are not logged or displayed as raw JSON.
 
 ## Cleanup
 
@@ -57,3 +61,5 @@ Only files matching the strict recovery naming rule in the app recovery director
 ## Limitations
 
 The app does not currently run a filesystem watcher. External modification detection is limited to safe save sequencing and backups. Disk-full and OS-specific rename failures are reported through the structured file error but not exhaustively classified by platform-specific error code.
+
+The recovery directory path is available from the About dialog. Current Rust code uses `std::env::temp_dir()/neword-recovery`, so the exact location can differ by OS and user session. User-selected project files remain wherever the user saved them.

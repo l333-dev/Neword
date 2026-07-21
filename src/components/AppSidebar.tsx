@@ -8,7 +8,10 @@ type AppSidebarProps = {
 
 export function AppSidebar({ items, className, onSelectItem }: AppSidebarProps) {
   return (
-    <aside className={["sidebar", className].filter(Boolean).join(" ")} aria-label="文書アウトライン">
+    <aside
+      className={["sidebar", className].filter(Boolean).join(" ")}
+      aria-label="文書アウトライン"
+    >
       <h2>アウトライン</h2>
       {items.length === 0 ? <p className="muted">見出しはまだありません。</p> : null}
       {items.map((item) => (

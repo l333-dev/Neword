@@ -10,7 +10,9 @@ describe("rule-based classification", () => {
   });
 
   it("classifies figure and table captions", () => {
-    expect(classifyBlock({ blockId: "f1", text: "図 1 実験装置" }).blockType).toBe("figure_caption");
+    expect(classifyBlock({ blockId: "f1", text: "図 1 実験装置" }).blockType).toBe(
+      "figure_caption",
+    );
     expect(classifyBlock({ blockId: "t1", text: "表1 測定結果" }).blockType).toBe("table_caption");
   });
 

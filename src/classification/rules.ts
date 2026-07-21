@@ -46,7 +46,13 @@ export const classificationRules: Rule[] = [
       if (style?.includes("heading") || style?.includes("見出し")) {
         const match = style.match(/[1-4]/);
         const level = input.headingLevel ?? (match ? Number(match[0]) : 1);
-        return result(input, "heading", "style.heading", `Word style indicates heading ${level}`, level);
+        return result(
+          input,
+          "heading",
+          "style.heading",
+          `Word style indicates heading ${level}`,
+          level,
+        );
       }
       return null;
     },
@@ -78,7 +84,13 @@ export const classificationRules: Rule[] = [
     id: "text.school_heading",
     classify: (input) =>
       schoolHeadingPattern.test(input.text.trim())
-        ? result(input, "heading", "text.school_heading", "Japanese school report heading pattern", 2)
+        ? result(
+            input,
+            "heading",
+            "text.school_heading",
+            "Japanese school report heading pattern",
+            2,
+          )
         : null,
   },
   {

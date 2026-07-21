@@ -80,6 +80,36 @@ describe("project recovery metadata", () => {
     expect(broken.valid).toBe(false);
   });
 
+  it("rejects recovery projects from unsupported future format versions", () => {
+    const current = createNewProject(new Date("2026-07-19T00:00:00.000Z"));
+    const futureProject = { ...current, formatVersion: 999 };
+    const file: RecoveryFileInfo = {
+      name: "autosave-future.json",
+      path: "/tmp/autosave-future.json",
+      modified_millis: Date.parse("2026-07-19T00:02:00.000Z"),
+      byte_size: 100,
+    };
+    const envelope = {
+      envelopeVersion: 1,
+      kind: "autosave",
+      projectKey: "test",
+      sourcePathHash: null,
+      sourcePath: null,
+      autosavedAt: "2026-07-19T00:02:00.000Z",
+      lastExplicitSaveAt: null,
+      projectUpdatedAt: current.updatedAt,
+      revision: 1,
+      contentHash: "future",
+      appVersion: "99.0.0",
+      project: futureProject,
+    };
+
+    const candidate = recoveryCandidateFromAutosave(file, JSON.stringify(envelope), current);
+
+    expect(candidate.valid).toBe(false);
+    expect(candidate.project).toBeUndefined();
+  });
+
   it("selects expired, per-project overflow, and total-size overflow recovery files for pruning", () => {
     const now = new Date("2026-07-19T00:00:00.000Z");
     const files: RecoveryFileInfo[] = [

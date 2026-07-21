@@ -145,7 +145,25 @@ fn backup_path_for(path: &Path) -> Result<PathBuf, FileCommandError> {
             )
         })?;
     let millis = now_millis()?;
-    Ok(path.with_file_name(format!("{file_name}.{millis}.{BACKUP_EXTENSION}")))
+    let first = path.with_file_name(format!("{file_name}.{millis}.{BACKUP_EXTENSION}"));
+    if !first.exists() {
+        return Ok(first);
+    }
+    for index in 1..=100 {
+        let candidate =
+            path.with_file_name(format!("{file_name}.{millis}.{index}.{BACKUP_EXTENSION}"));
+        if !candidate.exists() {
+            return Ok(candidate);
+        }
+    }
+    Err(file_error(
+        "backup.unique_name_failed",
+        "backup_path",
+        Some(path),
+        true,
+        "保存前バックアップのファイル名を決定できませんでした。",
+        None,
+    ))
 }
 
 fn create_backup(path: &Path) -> Result<Option<PathBuf>, FileCommandError> {
@@ -382,6 +400,11 @@ pub fn list_recovery_files() -> Result<Vec<RecoveryFileInfo>, FileCommandError> 
     files.sort_by_key(|file| file.modified_millis.unwrap_or(0));
     files.reverse();
     Ok(files)
+}
+
+#[tauri::command]
+pub fn recovery_dir_path() -> Result<String, FileCommandError> {
+    recovery_dir().map(|path| path.to_string_lossy().to_string())
 }
 
 #[cfg(test)]

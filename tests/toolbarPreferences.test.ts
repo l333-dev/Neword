@@ -15,7 +15,9 @@ describe("toolbar command definitions", () => {
     expect(new Set(DEFAULT_TOOLBAR_COMMAND_ORDER).size).toBe(DEFAULT_TOOLBAR_COMMAND_ORDER.length);
     expect(DEFAULT_TOOLBAR_COMMAND_ORDER).toEqual([...TOOLBAR_COMMAND_IDS]);
 
-    const definitions = new Map(TOOLBAR_COMMAND_DEFINITIONS.map((definition) => [definition.id, definition]));
+    const definitions = new Map(
+      TOOLBAR_COMMAND_DEFINITIONS.map((definition) => [definition.id, definition]),
+    );
     for (const id of DEFAULT_TOOLBAR_COMMAND_ORDER) {
       expect(definitions.has(id)).toBe(true);
     }

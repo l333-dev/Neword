@@ -32,7 +32,10 @@ describe("AppTopbar", () => {
       onSaveProjectAs: vi.fn(),
       onImportDocx: vi.fn(),
       onExportDocx: vi.fn(),
+      onReturnHome: vi.fn(),
       onOpenSettings: vi.fn(),
+      onOpenAbout: vi.fn(),
+      onQuit: vi.fn(),
       onDarkModeChange: vi.fn(),
       onImageSelected: vi.fn(),
     };
@@ -52,21 +55,27 @@ describe("AppTopbar", () => {
     expect(screen.getByText("保存エラー")).toBeTruthy();
     expect(screen.getByText("1,234 文字")).toBeTruthy();
     fireEvent.click(screen.getByText("新規"));
-    fireEvent.click(screen.getByText("開く"));
-    fireEvent.click(screen.getByText("保存"));
-    fireEvent.click(screen.getByText("別名保存"));
-    fireEvent.click(screen.getByText("DOCX読込"));
-    fireEvent.click(screen.getByText("DOCX書出"));
+    fireEvent.click(screen.getByText("ホーム"));
+    fireEvent.click(screen.getByText("プロジェクトを開く"));
+    fireEvent.click(screen.getByText("プロジェクト保存"));
+    fireEvent.click(screen.getByText("名前を付けて保存"));
+    fireEvent.click(screen.getByText("DOCXを読み込む"));
+    fireEvent.click(screen.getByText("DOCXへ書き出す"));
     fireEvent.click(screen.getByText("設定"));
+    fireEvent.click(screen.getByText("このアプリについて"));
+    fireEvent.click(screen.getByText("終了"));
     fireEvent.change(screen.getByLabelText("文書名"), { target: { value: "次の文書" } });
 
     expect(handlers.onNewProject).toHaveBeenCalledTimes(1);
+    expect(handlers.onReturnHome).toHaveBeenCalledTimes(1);
     expect(handlers.onOpenProject).toHaveBeenCalledTimes(1);
     expect(handlers.onSaveProject).toHaveBeenCalledTimes(1);
     expect(handlers.onSaveProjectAs).toHaveBeenCalledTimes(1);
     expect(handlers.onImportDocx).toHaveBeenCalledTimes(1);
     expect(handlers.onExportDocx).toHaveBeenCalledTimes(1);
     expect(handlers.onOpenSettings).toHaveBeenCalledTimes(1);
+    expect(handlers.onOpenAbout).toHaveBeenCalledTimes(1);
+    expect(handlers.onQuit).toHaveBeenCalledTimes(1);
     expect(handlers.onTitleChange).toHaveBeenCalledWith("次の文書");
   });
 
@@ -84,7 +93,10 @@ describe("AppTopbar", () => {
       onSaveProjectAs: vi.fn(),
       onImportDocx: vi.fn(),
       onExportDocx: vi.fn(),
+      onReturnHome: vi.fn(),
       onOpenSettings: vi.fn(),
+      onOpenAbout: vi.fn(),
+      onQuit: vi.fn(),
       onDarkModeChange: vi.fn(),
       onImageSelected: vi.fn(),
     };

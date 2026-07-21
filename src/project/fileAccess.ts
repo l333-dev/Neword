@@ -170,6 +170,11 @@ function fileNameFromPath(path: string): string {
   return path.split(/[\\/]/).at(-1) ?? "image";
 }
 
+function docxNameFromPath(path: string): string {
+  const normalized = path.replaceAll("\\", "/");
+  return normalized.split("/").at(-1) ?? "document.docx";
+}
+
 export async function saveProjectWithDialog(project: DocumentProject): Promise<string | null> {
   const path = await save({
     title: "プロジェクトを保存",
@@ -209,6 +214,10 @@ export async function deleteRecoveryFile(name: string): Promise<void> {
   await invoke("delete_recovery_file", { name });
 }
 
+export async function recoveryDirPath(): Promise<string> {
+  return invoke<string>("recovery_dir_path");
+}
+
 export async function openProjectWithDialog(): Promise<{
   path: string;
   project: DocumentProject;
@@ -223,6 +232,14 @@ export async function openProjectWithDialog(): Promise<{
   return { path, project: deserializeProject(contents) };
 }
 
+export async function openProjectFromPath(path: string): Promise<{
+  path: string;
+  project: DocumentProject;
+}> {
+  const contents = await invoke<string>("read_text_file", { path });
+  return { path, project: deserializeProject(contents) };
+}
+
 export async function openDocxWithDialog(): Promise<OpenDocxResult | null> {
   const path = await open({
     title: "DOCXを読み込む",
@@ -230,12 +247,15 @@ export async function openDocxWithDialog(): Promise<OpenDocxResult | null> {
     filters: [{ name: "Word Document", extensions: ["docx"] }],
   });
   if (!path || Array.isArray(path)) return null;
+  return openDocxFromPath(path);
+}
+
+export async function openDocxFromPath(path: string): Promise<OpenDocxResult> {
   const inspection = await invoke<DocxInspection>("inspect_docx_package", { path });
   const base64 = await invoke<string>("read_binary_file_base64", { path });
-  const normalized = path.replaceAll("\\", "/");
   return {
     path,
-    name: normalized.split("/").at(-1) ?? "document.docx",
+    name: docxNameFromPath(path),
     base64,
     inspection,
   };

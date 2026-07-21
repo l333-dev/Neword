@@ -1,7 +1,24 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { EditorContent, useEditor } from "@tiptap/react";
 import type { Content, Editor } from "@tiptap/core";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 
+import {
+  APP_IDENTIFIER,
+  APP_NAME,
+  APP_VERSION,
+  MAJOR_LIBRARIES,
+  SUPPORTED_FEATURES,
+  UNSUPPORTED_FEATURES,
+} from "./app/appInfo";
+import { classifyAppError, type UserFacingError } from "./app/appErrors";
+import {
+  dismissFirstRunGuide,
+  loadOnboardingState,
+  saveOnboardingState,
+  type OnboardingState,
+} from "./app/onboarding";
+import { guardedActionResult, hasUnsavedChanges, type UnsavedChoice } from "./app/unsavedChanges";
 import { AppSidebar } from "./components/AppSidebar";
 import { AppTopbar } from "./components/AppTopbar";
 import { SettingsPanel } from "./components/SettingsPanel";
@@ -17,6 +34,7 @@ import {
   type ParagraphFormatting,
   type ParagraphSettings,
 } from "./document-model/schema";
+import { createBlankDocumentProject } from "./document-model/newProject";
 import { trimTrailingEmptyParagraphsFromContent } from "./features/editor/contentCleanup";
 import { createEditorExtensions } from "./features/editor/editorConfig";
 import { EditorToolbar } from "./features/editor/EditorToolbar";
@@ -33,8 +51,10 @@ import {
   deleteRecoveryFile,
   listRecoveryFiles,
   openDocxWithDialog,
+  openProjectFromPath,
   openProjectWithDialog,
   readRecoveryFile,
+  recoveryDirPath,
   saveProjectToPath,
   saveProjectWithDialog,
   writeProjectAutosave,
@@ -42,6 +62,15 @@ import {
   type SaveStatus,
 } from "./project/fileAccess";
 import { markProjectUpdated } from "./project/serialization";
+import {
+  addRecentProject,
+  clearRecentProjects,
+  loadRecentProjects,
+  removeRecentProject,
+  saveRecentProjects,
+  type RecentProjectEntry,
+  type RecentProjects,
+} from "./project/recentProjects";
 import {
   AUTOSAVE_DEBOUNCE_MS,
   autosaveFileName,
@@ -90,6 +119,11 @@ type SelectedImageSettings = {
   altText: string;
 };
 
+type UnsavedDialogState = {
+  actionLabel: string;
+  resolve: (choice: UnsavedChoice) => void;
+} | null;
+
 const defaultTableCellSettings: TableCellSettings = {
   backgroundColor: null,
   verticalAlign: "top",
@@ -109,10 +143,23 @@ const defaultSelectedImageSettings: SelectedImageSettings = {
 const HexColorPattern = /^#[0-9A-Fa-f]{6}$/;
 
 export default function App() {
+  const isTestEnvironment = import.meta.env.MODE === "test";
   const [project, setProject] = useState<DocumentProject>(() => createNewProject());
+  const [documentOpen, setDocumentOpen] = useState(isTestEnvironment);
   const [userPreferences, setUserPreferences] = useState<UserPreferences>(
     () => loadUserPreferences().preferences,
   );
+  const [onboardingState, setOnboardingState] = useState<OnboardingState>(() =>
+    loadOnboardingState(),
+  );
+  const [showFirstRunGuide, setShowFirstRunGuide] = useState(
+    () => !isTestEnvironment && !loadOnboardingState().firstRunGuideDismissed,
+  );
+  const [recentProjects, setRecentProjects] = useState<RecentProjects>(() => loadRecentProjects());
+  const [appError, setAppError] = useState<UserFacingError | null>(null);
+  const [showAbout, setShowAbout] = useState(false);
+  const [unsavedDialog, setUnsavedDialog] = useState<UnsavedDialogState>(null);
+  const [recoveryDirectory, setRecoveryDirectory] = useState<string | null>(null);
   const [preferenceSaveError, setPreferenceSaveError] = useState<string | null>(null);
   const editingPreferences = userPreferences.editing;
   const [showAdvancedEditingSettings, setShowAdvancedEditingSettings] = useState(false);
@@ -143,6 +190,7 @@ export default function App() {
   const latestProjectRef = useRef(project);
   const latestProjectPathRef = useRef(projectPath);
   const saveQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const closeInProgressRef = useRef(false);
   const autosaveRevisionRef = useRef(0);
   const sessionProjectKeyRef = useRef(`session-${crypto.randomUUID()}`);
   editingPreferencesRef.current = editingPreferences;
@@ -226,6 +274,28 @@ export default function App() {
     setPreferenceSaveError(null);
   }, [userPreferences]);
 
+  useEffect(() => {
+    saveRecentProjects(recentProjects);
+  }, [recentProjects]);
+
+  useEffect(() => {
+    saveOnboardingState(onboardingState);
+  }, [onboardingState]);
+
+  useEffect(() => {
+    let cancelled = false;
+    recoveryDirPath()
+      .then((path) => {
+        if (!cancelled) setRecoveryDirectory(path);
+      })
+      .catch(() => {
+        if (!cancelled) setRecoveryDirectory(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const updatePreferences = useCallback((update: UserPreferencesUpdate) => {
     setUserPreferences((current) => updateUserPreferences(current, update));
   }, []);
@@ -248,9 +318,12 @@ export default function App() {
     updatePreferences({ layout: { settingsVisible: true } });
   }, [updatePreferences]);
 
-  const enqueueSave = useCallback((operation: () => Promise<void>): Promise<void> => {
+  const enqueueSave = useCallback(<T,>(operation: () => Promise<T>): Promise<T> => {
     const next = saveQueueRef.current.then(operation, operation);
-    saveQueueRef.current = next.catch(() => undefined);
+    saveQueueRef.current = next.then(
+      () => undefined,
+      () => undefined,
+    );
     return next;
   }, []);
 
@@ -471,8 +544,12 @@ export default function App() {
     editor.chain().focus().updateAttributes(nodeType, { paragraphFormatting: formatting }).run();
   }, [editingPreferences, editor]);
 
-  const saveProject = useCallback(async () => {
-    await enqueueSave(async () => {
+  const rememberRecentProject = useCallback((path: string, displayName: string) => {
+    setRecentProjects((current) => addRecentProject(current, { path, displayName }));
+  }, []);
+
+  const saveProject = useCallback(async (): Promise<boolean> => {
+    return enqueueSave(async () => {
       setSaveStatus("saving");
       const projectToSave = projectForSave(latestProjectRef.current, editingPreferencesRef.current);
       const saveHash = projectContentHash(projectToSave);
@@ -484,10 +561,11 @@ export default function App() {
           const path = await saveProjectWithDialog(projectToSave);
           if (!path) {
             setSaveStatus("dirty");
-            return;
+            return false;
           }
           setProjectPath(path);
           latestProjectPathRef.current = path;
+          rememberRecentProject(path, projectToSave.metadata.title);
         }
         const latestHash = projectContentHash(
           projectForSave(latestProjectRef.current, editingPreferencesRef.current),
@@ -495,14 +573,20 @@ export default function App() {
         const savedAt = new Date().toISOString();
         setLastExplicitSaveAt(savedAt);
         setSaveStatus(latestHash === saveHash ? "saved" : "dirty");
-      } catch {
+        if (latestProjectPathRef.current) {
+          rememberRecentProject(latestProjectPathRef.current, projectToSave.metadata.title);
+        }
+        return true;
+      } catch (error) {
         setSaveStatus("error");
+        setAppError(classifyAppError(error, "プロジェクト保存"));
+        return false;
       }
     });
-  }, [enqueueSave]);
+  }, [enqueueSave, rememberRecentProject]);
 
-  const saveProjectAs = useCallback(async () => {
-    await enqueueSave(async () => {
+  const saveProjectAs = useCallback(async (): Promise<boolean> => {
+    return enqueueSave(async () => {
       setSaveStatus("saving");
       const projectToSave = projectForSave(latestProjectRef.current, editingPreferencesRef.current);
       const saveHash = projectContentHash(projectToSave);
@@ -517,21 +601,41 @@ export default function App() {
             projectForSave(latestProjectRef.current, editingPreferencesRef.current),
           );
           setSaveStatus(latestHash === saveHash ? "saved" : "dirty");
+          rememberRecentProject(path, projectToSave.metadata.title);
+          return true;
         } else {
           setSaveStatus("dirty");
+          return false;
         }
-      } catch {
+      } catch (error) {
         setSaveStatus("error");
+        setAppError(classifyAppError(error, "プロジェクト別名保存"));
+        return false;
       }
     });
-  }, [enqueueSave]);
+  }, [enqueueSave, rememberRecentProject]);
 
-  const newProject = useCallback(() => {
-    const next = {
-      ...createNewProject(),
-      documentDefaults: documentDefaultsFromEditingPreferences(editingPreferences),
-      paragraphSettings: paragraphFormattingFromEditingPreferences(editingPreferences, false),
-    };
+  const askUnsavedChoice = useCallback((actionLabel: string): Promise<UnsavedChoice> => {
+    return new Promise((resolve) => {
+      setUnsavedDialog({ actionLabel, resolve });
+    });
+  }, []);
+
+  const runAfterUnsavedCheck = useCallback(
+    async (actionLabel: string, operation: () => Promise<void> | void): Promise<boolean> => {
+      if (documentOpen && hasUnsavedChanges(saveStatus)) {
+        const choice = await askUnsavedChoice(actionLabel);
+        const saveSucceeded = choice === "save" ? await saveProject() : undefined;
+        if (guardedActionResult({ choice, saveSucceeded }) === "stay") return false;
+      }
+      await operation();
+      return true;
+    },
+    [askUnsavedChoice, documentOpen, saveProject, saveStatus],
+  );
+
+  const createAndOpenNewProject = useCallback(() => {
+    const { project: next } = createBlankDocumentProject({ editingPreferences });
     setProject(next);
     setProjectPath(null);
     latestProjectPathRef.current = null;
@@ -539,31 +643,73 @@ export default function App() {
     setLastExplicitSaveAt(null);
     setLastAutosaveAt(null);
     editor?.commands.setContent(hydrateImageSources(next.editorContent, next.assets) as Content);
-    setSaveStatus("saved");
+    setDocumentOpen(true);
+    setSaveStatus("dirty");
   }, [editingPreferences, editor]);
 
+  const newProject = useCallback(async () => {
+    await runAfterUnsavedCheck("新規文書を作成", createAndOpenNewProject);
+  }, [createAndOpenNewProject, runAfterUnsavedCheck]);
+
+  const openLoadedProject = useCallback(
+    (loaded: { path: string; project: DocumentProject }) => {
+      setProject(loaded.project);
+      setProjectPath(loaded.path);
+      latestProjectPathRef.current = loaded.path;
+      setLastExplicitSaveAt(new Date().toISOString());
+      setLastAutosaveAt(null);
+      editor?.commands.setContent(
+        hydrateImageSources(loaded.project.editorContent, loaded.project.assets) as Content,
+      );
+      setDocumentOpen(true);
+      setSaveStatus("saved");
+      rememberRecentProject(loaded.path, loaded.project.metadata.title);
+    },
+    [editor, rememberRecentProject],
+  );
+
   const openProject = useCallback(async () => {
-    const loaded = await openProjectWithDialog();
-    if (!loaded) return;
-    setProject(loaded.project);
-    setProjectPath(loaded.path);
-    latestProjectPathRef.current = loaded.path;
-    setLastExplicitSaveAt(new Date().toISOString());
-    editor?.commands.setContent(
-      hydrateImageSources(loaded.project.editorContent, loaded.project.assets) as Content,
-    );
-    setSaveStatus("saved");
-  }, [editor]);
+    await runAfterUnsavedCheck("別のプロジェクトを開く", async () => {
+      try {
+        const loaded = await openProjectWithDialog();
+        if (!loaded) return;
+        openLoadedProject(loaded);
+      } catch (error) {
+        setAppError(classifyAppError(error, "プロジェクト読み込み"));
+      }
+    });
+  }, [openLoadedProject, runAfterUnsavedCheck]);
+
+  const openRecentProject = useCallback(
+    async (entry: RecentProjectEntry) => {
+      await runAfterUnsavedCheck("最近使ったプロジェクトを開く", async () => {
+        try {
+          openLoadedProject(await openProjectFromPath(entry.path));
+        } catch (error) {
+          setAppError(classifyAppError(error, "最近使ったプロジェクトの読み込み"));
+        }
+      });
+    },
+    [openLoadedProject, runAfterUnsavedCheck],
+  );
+
+  const returnHome = useCallback(async () => {
+    await runAfterUnsavedCheck("ホーム画面へ戻る", () => {
+      setDocumentOpen(false);
+      setPreview(null);
+    });
+  }, [runAfterUnsavedCheck]);
 
   const recoverCandidate = useCallback(
     (candidate: RecoveryCandidate) => {
       if (!candidate.valid || !candidate.project) return;
       setProject(candidate.project);
-      setProjectPath(candidate.envelope?.sourcePath ?? null);
-      latestProjectPathRef.current = candidate.envelope?.sourcePath ?? null;
+      setProjectPath(null);
+      latestProjectPathRef.current = null;
       editor?.commands.setContent(
         hydrateImageSources(candidate.project.editorContent, candidate.project.assets) as Content,
       );
+      setDocumentOpen(true);
       setSaveStatus("recovered");
       setRecoveryCandidates((current) =>
         current.filter((item) => item.fileName !== candidate.fileName),
@@ -609,6 +755,7 @@ export default function App() {
       }),
     );
     setPreview(null);
+    setDocumentOpen(true);
     setSaveStatus("dirty");
   }, [editor, preview]);
 
@@ -619,9 +766,15 @@ export default function App() {
       return;
     try {
       const base64 = await exportDocumentToDocxBase64(exportDocument);
-      await writeBinaryFileWithDialog(`${project.metadata.title || "document"}.docx`, base64);
+      const path = await writeBinaryFileWithDialog(
+        `${project.metadata.title || "document"}.docx`,
+        base64,
+      );
+      if (path) {
+        setProject((current) => ({ ...current, lastExportedAt: new Date().toISOString() }));
+      }
     } catch (error) {
-      alert(error instanceof Error ? error.message : "DOCX書き出しに失敗しました。");
+      setAppError(classifyAppError(error, "DOCX書き出し"));
     }
   }, [project]);
 
@@ -665,13 +818,22 @@ export default function App() {
     return () => window.clearTimeout(timeout);
   }, [enqueueSave, lastExplicitSaveAt, saveStatus]);
 
+  const requestAppClose = useCallback(async () => {
+    const canClose = await runAfterUnsavedCheck("アプリを終了", () => undefined);
+    if (!canClose) return;
+    closeInProgressRef.current = true;
+    if (isTauriRuntime()) {
+      await getCurrentWindow().destroy();
+    }
+  }, [runAfterUnsavedCheck]);
+
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       const ctrl = event.ctrlKey || event.metaKey;
       if (!ctrl) return;
       if (event.key === "n") {
         event.preventDefault();
-        newProject();
+        void newProject();
       } else if (event.key === "o") {
         event.preventDefault();
         void openProject();
@@ -690,11 +852,27 @@ export default function App() {
       } else if (event.key === ",") {
         event.preventDefault();
         openSettingsPanel();
+      } else if (event.key === "q") {
+        event.preventDefault();
+        void requestAppClose();
       }
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [newProject, openProject, openSettingsPanel, saveProject, saveProjectAs]);
+  }, [newProject, openProject, openSettingsPanel, requestAppClose, saveProject, saveProjectAs]);
+
+  useEffect(() => {
+    if (!isTauriRuntime()) return undefined;
+    const appWindow = getCurrentWindow();
+    const unlistenPromise = appWindow.onCloseRequested(async (event) => {
+      if (closeInProgressRef.current) return;
+      event.preventDefault();
+      await requestAppClose();
+    });
+    return () => {
+      void unlistenPromise.then((unlisten) => unlisten());
+    };
+  }, [requestAppClose]);
 
   function replaceFirst() {
     if (!editor || !searchTerm) return;
@@ -704,19 +882,28 @@ export default function App() {
   }
 
   async function openDocxImport() {
-    const opened = await openDocxWithDialog();
-    if (!opened) return;
-    const converted = await convertDocxBase64ToImportResult(
-      opened.base64,
-      {
-        name: opened.name,
-        sizeBytes: opened.inspection.entries.reduce((sum, entry) => sum + entry.compressed_size, 0),
-        path: opened.path,
-        inspectedAt: new Date().toISOString(),
-      },
-      opened.inspection,
-    );
-    setPreview(converted);
+    await runAfterUnsavedCheck("DOCXを読み込む", async () => {
+      try {
+        const opened = await openDocxWithDialog();
+        if (!opened) return;
+        const converted = await convertDocxBase64ToImportResult(
+          opened.base64,
+          {
+            name: opened.name,
+            sizeBytes: opened.inspection.entries.reduce(
+              (sum, entry) => sum + entry.compressed_size,
+              0,
+            ),
+            path: opened.path,
+            inspectedAt: new Date().toISOString(),
+          },
+          opened.inspection,
+        );
+        setPreview(converted);
+      } catch (error) {
+        setAppError(classifyAppError(error, "DOCX読み込み"));
+      }
+    });
   }
 
   async function insertImageFromPayload(payload: {
@@ -927,9 +1114,15 @@ export default function App() {
     );
   };
 
+  const dismissGuide = () => {
+    const next = dismissFirstRunGuide(onboardingState);
+    setOnboardingState(next);
+    setShowFirstRunGuide(false);
+  };
+
   return (
     <main className="app" data-theme={resolvedColorMode} style={appVisualStyle}>
-      {recoveryCandidates.length > 0 ? (
+      {documentOpen && recoveryCandidates.length > 0 ? (
         <section className="recovery-panel" aria-label="復旧候補">
           <h2>復旧候補</h2>
           <p>
@@ -1003,13 +1196,16 @@ export default function App() {
           );
           setSaveStatus("dirty");
         }}
-        onNewProject={newProject}
+        onNewProject={() => void newProject()}
         onOpenProject={() => void openProject()}
         onSaveProject={() => void saveProject()}
         onSaveProjectAs={() => void saveProjectAs()}
         onImportDocx={() => void openDocxImport()}
         onExportDocx={() => void exportDocx()}
+        onReturnHome={() => void returnHome()}
         onOpenSettings={openSettingsPanel}
+        onOpenAbout={() => setShowAbout(true)}
+        onQuit={() => void requestAppClose()}
         onDarkModeChange={(enabled) =>
           updatePreferences({
             appearance: { colorMode: enabled ? "dark" : "light" },
@@ -1017,6 +1213,13 @@ export default function App() {
         }
         onImageSelected={(file) => void onImageSelected(file)}
       />
+      <div className="project-state-bar" aria-label="プロジェクト状態">
+        <span>編集中: 内部プロジェクト</span>
+        <span>現在の保存先: {projectPath ?? "未保存の新規文書"}</span>
+        <span>元DOCX: {project.metadata.sourceFileName ?? "なし。元DOCXは直接変更しません。"}</span>
+        <span>最終DOCX書き出し: {project.lastExportedAt ?? "未実行"}</span>
+        <span>{hasUnsavedChanges(saveStatus) ? "未保存の変更あり" : "未保存の変更なし"}</span>
+      </div>
       {lastAutosaveAt || lastExplicitSaveAt ? (
         <div className="save-timestamps" aria-label="保存日時">
           {lastExplicitSaveAt ? <span>明示保存: {lastExplicitSaveAt}</span> : null}
@@ -1024,13 +1227,31 @@ export default function App() {
         </div>
       ) : null}
 
-      <div
-        className="workspace"
-        data-layout-regions={layoutRegions.join(" ")}
-        style={workspaceStyle}
-      >
-        {layoutRegions.map(renderLayoutRegion)}
-      </div>
+      {documentOpen ? (
+        <div
+          className="workspace"
+          data-layout-regions={layoutRegions.join(" ")}
+          style={workspaceStyle}
+        >
+          {layoutRegions.map(renderLayoutRegion)}
+        </div>
+      ) : (
+        <HomeScreen
+          recentProjects={recentProjects.entries}
+          recoveryCandidates={recoveryCandidates}
+          onNewProject={() => void newProject()}
+          onImportDocx={() => void openDocxImport()}
+          onOpenProject={() => void openProject()}
+          onOpenRecentProject={(entry) => void openRecentProject(entry)}
+          onRemoveRecentProject={(path) =>
+            setRecentProjects((current) => removeRecentProject(current, path))
+          }
+          onClearRecentProjects={() => setRecentProjects(clearRecentProjects())}
+          onRecoverCandidate={recoverCandidate}
+          onDeleteRecoveryCandidate={(candidate) => void deleteRecoveryCandidate(candidate)}
+          onDismissRecoveryCandidate={dismissRecoveryCandidate}
+        />
+      )}
 
       {preview ? (
         <section className="modal" role="dialog" aria-modal="true" aria-label="変換確認">
@@ -1234,7 +1455,319 @@ export default function App() {
           </div>
         </section>
       ) : null}
+      {unsavedDialog ? (
+        <UnsavedChangesDialog
+          actionLabel={unsavedDialog.actionLabel}
+          onChoose={(choice) => {
+            unsavedDialog.resolve(choice);
+            setUnsavedDialog(null);
+          }}
+        />
+      ) : null}
+      {appError ? <ErrorDialog error={appError} onClose={() => setAppError(null)} /> : null}
+      {showFirstRunGuide ? <FirstRunGuide onClose={dismissGuide} /> : null}
+      {showAbout ? (
+        <AboutDialog
+          projectPath={projectPath}
+          recoveryDirectory={recoveryDirectory}
+          onShowGuide={() => setShowFirstRunGuide(true)}
+          onClose={() => setShowAbout(false)}
+        />
+      ) : null}
     </main>
+  );
+}
+
+function HomeScreen({
+  recentProjects,
+  recoveryCandidates,
+  onNewProject,
+  onImportDocx,
+  onOpenProject,
+  onOpenRecentProject,
+  onRemoveRecentProject,
+  onClearRecentProjects,
+  onRecoverCandidate,
+  onDeleteRecoveryCandidate,
+  onDismissRecoveryCandidate,
+}: {
+  recentProjects: RecentProjectEntry[];
+  recoveryCandidates: RecoveryCandidate[];
+  onNewProject: () => void;
+  onImportDocx: () => void;
+  onOpenProject: () => void;
+  onOpenRecentProject: (entry: RecentProjectEntry) => void;
+  onRemoveRecentProject: (path: string) => void;
+  onClearRecentProjects: () => void;
+  onRecoverCandidate: (candidate: RecoveryCandidate) => void;
+  onDeleteRecoveryCandidate: (candidate: RecoveryCandidate) => void;
+  onDismissRecoveryCandidate: (candidate: RecoveryCandidate) => void;
+}) {
+  return (
+    <section className="home-screen" aria-label="ホーム">
+      <div className="home-main">
+        <h1>{APP_NAME}</h1>
+        <p>
+          内部プロジェクトを編集し、必要な時だけ新しいDOCXを書き出します。読み込んだ元DOCXは直接変更しません。
+        </p>
+        <div className="home-actions">
+          <button type="button" onClick={onNewProject}>
+            新規文書を作成
+          </button>
+          <button type="button" onClick={onImportDocx}>
+            DOCXを読み込む
+          </button>
+          <button type="button" onClick={onOpenProject}>
+            保存済みプロジェクトを開く
+          </button>
+        </div>
+      </div>
+      <section className="home-section" aria-label="最近使用したプロジェクト">
+        <div className="section-heading-row">
+          <h2>最近使用したプロジェクト</h2>
+          <button
+            type="button"
+            onClick={onClearRecentProjects}
+            disabled={recentProjects.length === 0}
+          >
+            履歴をすべて消去
+          </button>
+        </div>
+        {recentProjects.length === 0 ? <p className="muted">履歴はまだありません。</p> : null}
+        <div className="recent-list">
+          {recentProjects.map((entry) => (
+            <article key={entry.path} className="recent-entry">
+              <div>
+                <h3>{entry.displayName}</h3>
+                <p>{entry.path}</p>
+                <p>最後に開いた日時: {entry.lastOpenedAt}</p>
+              </div>
+              <div className="button-row">
+                <button type="button" onClick={() => onOpenRecentProject(entry)}>
+                  開く
+                </button>
+                <button type="button" onClick={() => onRemoveRecentProject(entry.path)}>
+                  履歴から削除
+                </button>
+              </div>
+            </article>
+          ))}
+        </div>
+      </section>
+      <RecoveryList
+        candidates={recoveryCandidates}
+        onRecoverCandidate={onRecoverCandidate}
+        onDeleteRecoveryCandidate={onDeleteRecoveryCandidate}
+        onDismissRecoveryCandidate={onDismissRecoveryCandidate}
+      />
+    </section>
+  );
+}
+
+function RecoveryList({
+  candidates,
+  onRecoverCandidate,
+  onDeleteRecoveryCandidate,
+  onDismissRecoveryCandidate,
+}: {
+  candidates: RecoveryCandidate[];
+  onRecoverCandidate: (candidate: RecoveryCandidate) => void;
+  onDeleteRecoveryCandidate: (candidate: RecoveryCandidate) => void;
+  onDismissRecoveryCandidate: (candidate: RecoveryCandidate) => void;
+}) {
+  if (candidates.length === 0) return null;
+  return (
+    <section className="home-section recovery-manager" aria-label="リカバリ管理">
+      <h2>リカバリ可能な文書</h2>
+      <p>復旧しても元のプロジェクトファイルへ即座には上書きしません。</p>
+      <div className="recovery-list">
+        {candidates.map((candidate) => (
+          <article
+            key={`${candidate.kind}-${candidate.fileName}`}
+            className={`recovery-candidate ${candidate.valid ? "" : "recovery-invalid"}`}
+          >
+            <h3>{candidate.project?.metadata.title ?? candidate.fileName}</h3>
+            <dl>
+              <div>
+                <dt>リカバリ保存日時</dt>
+                <dd>{candidate.envelope?.autosavedAt ?? candidate.modifiedAt ?? "不明"}</dd>
+              </div>
+              <div>
+                <dt>元のプロジェクトパス</dt>
+                <dd>{candidate.envelope?.sourcePath ?? "未保存または不明"}</dd>
+              </div>
+              <div>
+                <dt>リカバリファイル</dt>
+                <dd>{candidate.path}</dd>
+              </div>
+              <div>
+                <dt>検証状態</dt>
+                <dd>{candidate.valid ? candidate.reason : "読み込み不能: " + candidate.reason}</dd>
+              </div>
+            </dl>
+            <div className="button-row">
+              <button
+                type="button"
+                disabled={!candidate.valid}
+                onClick={() => onRecoverCandidate(candidate)}
+              >
+                復旧して開く
+              </button>
+              <button type="button" onClick={() => onDeleteRecoveryCandidate(candidate)}>
+                内容を確認せず削除
+              </button>
+              <button type="button" onClick={() => onDismissRecoveryCandidate(candidate)}>
+                後で判断する
+              </button>
+            </div>
+          </article>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function UnsavedChangesDialog({
+  actionLabel,
+  onChoose,
+}: {
+  actionLabel: string;
+  onChoose: (choice: UnsavedChoice) => void;
+}) {
+  return (
+    <section className="modal" role="dialog" aria-modal="true" aria-label="未保存変更の確認">
+      <div className="modal-panel narrow-modal">
+        <h2>未保存の変更があります</h2>
+        <p>{actionLabel} の前に、現在の内部プロジェクトを保存するか選んでください。</p>
+        <p>「保存せず続行」は現在の編集内容を破棄します。</p>
+        <div className="modal-actions">
+          <button type="button" onClick={() => onChoose("save")}>
+            保存する
+          </button>
+          <button type="button" className="danger-button" onClick={() => onChoose("discard")}>
+            保存せず続行
+          </button>
+          <button type="button" onClick={() => onChoose("cancel")}>
+            キャンセル
+          </button>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function ErrorDialog({ error, onClose }: { error: UserFacingError; onClose: () => void }) {
+  return (
+    <section className="modal" role="dialog" aria-modal="true" aria-label="エラー">
+      <div className="modal-panel narrow-modal">
+        <h2>{error.title}</h2>
+        <p>{error.summary}</p>
+        <p>{error.currentContentState}</p>
+        <p>{error.dataLossRisk}</p>
+        <h3>次に試せる操作</h3>
+        <ul>
+          {error.nextActions.map((action) => (
+            <li key={action}>{action}</li>
+          ))}
+        </ul>
+        {error.technicalDetails ? (
+          <details>
+            <summary>技術的な詳細</summary>
+            <textarea readOnly value={error.technicalDetails} />
+          </details>
+        ) : null}
+        <div className="modal-actions">
+          <button type="button" onClick={onClose}>
+            閉じる
+          </button>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function FirstRunGuide({ onClose }: { onClose: () => void }) {
+  return (
+    <section className="modal" role="dialog" aria-modal="true" aria-label="初回起動案内">
+      <div className="modal-panel narrow-modal">
+        <h2>初回起動案内</h2>
+        <ul>
+          <li>このアプリはローカルで動作し、文書内容を外部送信しません。</li>
+          <li>AI APIやクラウド変換サービスは使用しません。</li>
+          <li>読み込んだ元DOCXは直接変更せず、新しいDOCXを書き出します。</li>
+          <li>DOCX互換性は限定的で、未対応要素は警告として表示します。</li>
+          <li>編集中の内部プロジェクトと書き出しDOCXは別物です。</li>
+          <li>重要な文書では、書き出し後に内容を確認してください。</li>
+        </ul>
+        <div className="modal-actions">
+          <button type="button" onClick={onClose}>
+            理解しました
+          </button>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function AboutDialog({
+  projectPath,
+  recoveryDirectory,
+  onShowGuide,
+  onClose,
+}: {
+  projectPath: string | null;
+  recoveryDirectory: string | null;
+  onShowGuide: () => void;
+  onClose: () => void;
+}) {
+  return (
+    <section className="modal" role="dialog" aria-modal="true" aria-label="このアプリについて">
+      <div className="modal-panel">
+        <h2>{APP_NAME}</h2>
+        <dl className="preview-summary">
+          <div>
+            <dt>バージョン</dt>
+            <dd>{APP_VERSION}</dd>
+          </div>
+          <div>
+            <dt>識別子</dt>
+            <dd>{APP_IDENTIFIER}</dd>
+          </div>
+          <div>
+            <dt>現在のプロジェクト</dt>
+            <dd>{projectPath ?? "未保存"}</dd>
+          </div>
+          <div>
+            <dt>リカバリ保存場所</dt>
+            <dd>{recoveryDirectory ?? "取得できませんでした"}</dd>
+          </div>
+        </dl>
+        <p>Personal Document Editorは完全ローカルで動作し、AI APIやクラウド変換を使用しません。</p>
+        <h3>対応している主要機能</h3>
+        <ul>
+          {SUPPORTED_FEATURES.map((feature) => (
+            <li key={feature}>{feature}</li>
+          ))}
+        </ul>
+        <h3>主な未対応機能</h3>
+        <ul>
+          {UNSUPPORTED_FEATURES.map((feature) => (
+            <li key={feature}>{feature}</li>
+          ))}
+        </ul>
+        <h3>主要ライブラリ</h3>
+        <p>{MAJOR_LIBRARIES.join(", ")}</p>
+        <p>ライセンス情報は `package.json` と `src-tauri/Cargo.toml` から確認できます。</p>
+        <div className="modal-actions">
+          <button type="button" onClick={onShowGuide}>
+            初回起動案内を再表示
+          </button>
+          <button type="button" onClick={onClose}>
+            閉じる
+          </button>
+        </div>
+      </div>
+    </section>
   );
 }
 
@@ -1248,6 +1781,10 @@ function projectForSave(
       : project.editorContent,
   );
   return { ...project, editorContent };
+}
+
+function isTauriRuntime(): boolean {
+  return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 }
 
 type JsonNode = {

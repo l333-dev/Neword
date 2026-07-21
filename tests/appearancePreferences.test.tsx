@@ -202,16 +202,14 @@ describe("display preferences stay separate from documents", () => {
 });
 
 function PanelHarness({ saveError = null }: { saveError?: string | null }) {
-  const [preferences, setPreferences] = useState<UserPreferences>(() => getDefaultUserPreferences());
+  const [preferences, setPreferences] = useState<UserPreferences>(() =>
+    getDefaultUserPreferences(),
+  );
   const update = (patch: UserPreferencesUpdate) => {
     setPreferences((current) => updateUserPreferences(current, patch));
   };
   return (
-    <AppearancePreferencesPanel
-      preferences={preferences}
-      onChange={update}
-      saveError={saveError}
-    />
+    <AppearancePreferencesPanel preferences={preferences} onChange={update} saveError={saveError} />
   );
 }
 
@@ -231,8 +229,7 @@ function installMatchMediaMock(initialMatches: boolean) {
       listeners.delete(listener);
     },
     addListener: (listener: (event: MediaQueryListEvent) => void) => listeners.add(listener),
-    removeListener: (listener: (event: MediaQueryListEvent) => void) =>
-      listeners.delete(listener),
+    removeListener: (listener: (event: MediaQueryListEvent) => void) => listeners.delete(listener),
     dispatchEvent: () => true,
   } as MediaQueryList;
   vi.stubGlobal("matchMedia", () => media);

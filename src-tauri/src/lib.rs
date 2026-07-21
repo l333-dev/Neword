@@ -14,6 +14,7 @@ pub fn run() {
             commands::files::read_recovery_file,
             commands::files::delete_recovery_file,
             commands::files::list_recovery_files,
+            commands::files::recovery_dir_path,
             commands::docx::inspect_docx_package,
         ])
         .run(tauri::generate_context!())

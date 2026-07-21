@@ -17,7 +17,10 @@ type AppTopbarProps = {
   onSaveProjectAs: () => void;
   onImportDocx: () => void;
   onExportDocx: () => void;
+  onReturnHome: () => void;
   onOpenSettings: () => void;
+  onOpenAbout: () => void;
+  onQuit: () => void;
   onDarkModeChange: (enabled: boolean) => void;
   onImageSelected: (file: File | undefined) => void;
 };
@@ -36,7 +39,10 @@ export function AppTopbar({
   onSaveProjectAs,
   onImportDocx,
   onExportDocx,
+  onReturnHome,
   onOpenSettings,
+  onOpenAbout,
+  onQuit,
   onDarkModeChange,
   onImageSelected,
 }: AppTopbarProps) {
@@ -55,23 +61,32 @@ export function AppTopbar({
       <button type="button" onClick={onNewProject}>
         新規
       </button>
+      <button type="button" onClick={onReturnHome}>
+        ホーム
+      </button>
       <button type="button" onClick={onOpenProject}>
-        開く
+        プロジェクトを開く
       </button>
       <button type="button" onClick={onSaveProject}>
-        保存
+        プロジェクト保存
       </button>
       <button type="button" onClick={onSaveProjectAs}>
-        別名保存
+        名前を付けて保存
       </button>
       <button type="button" onClick={onImportDocx}>
-        DOCX読込
+        DOCXを読み込む
       </button>
       <button type="button" onClick={onExportDocx}>
-        DOCX書出
+        DOCXへ書き出す
       </button>
       <button type="button" onClick={onOpenSettings}>
         設定
+      </button>
+      <button type="button" onClick={onOpenAbout}>
+        このアプリについて
+      </button>
+      <button type="button" onClick={onQuit}>
+        終了
       </button>
       <label className="toggle">
         <input

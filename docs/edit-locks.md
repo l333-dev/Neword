@@ -41,3 +41,5 @@ Choices:
 - Open editable copy: open as an unsaved document. The original file is not modified and a new lock is created only after Save As.
 - Edit anyway: keeps external update detection and backup-capable atomic save. It does not delete the other lock.
 - Cancel: leave the current document unchanged.
+
+Save As also checks the selected destination before writing when it differs from the current project path. If that destination has an active or uncertain edit lock, the app shows the same conflict dialog and cancels the write unless the user explicitly chooses to edit despite the conflict. This prevents Save As from overwriting another active project session before the lock warning is shown.

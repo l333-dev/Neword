@@ -85,6 +85,7 @@ import {
   recoveryMigrationState,
   refreshProjectEditLock,
   releaseProjectEditLock,
+  selectProjectSavePath,
   saveProjectToPath,
   saveProjectWithDialog,
   startupOpenPaths,
@@ -1092,13 +1093,38 @@ export default function App() {
       const projectToSave = projectForSave(latestProjectRef.current, editingPreferencesRef.current);
       setSavingSizeBytes(estimateSerializedSizeBytes(JSON.stringify(projectToSave)));
       const saveHash = projectContentHash(projectToSave);
+      let newLock: ProjectEditLock | null = null;
+      let newLockPath: string | null = null;
       try {
-        const path = await saveProjectWithDialog(projectToSave);
+        const path = await selectProjectSavePath(projectToSave);
         if (path) {
-          await releaseActiveEditLock();
+          const currentPath = latestProjectPathRef.current;
+          const isCurrentPath = currentPath === path;
+          if (!isCurrentPath) {
+            const status = await checkProjectEditLock(path);
+            if (shouldWarnAboutEditLock(status)) {
+              const choice = await askEditLockChoice(path, status);
+              if (choice !== "force-edit") {
+                setSaveStatus("dirty");
+                return false;
+              }
+            }
+            newLock = await createProjectEditLock({
+              projectPath: path,
+              sessionId: sessionProjectKeyRef.current,
+              appVersion: APP_VERSION,
+              keepDisplayPath: true,
+            });
+            newLockPath = path;
+          }
+          await saveProjectToPath(path, projectToSave);
+          if (!isCurrentPath) {
+            await releaseActiveEditLock();
+            setReadOnlyReason(null);
+            setActiveEditLock(newLock);
+          }
           setProjectPath(path);
           latestProjectPathRef.current = path;
-          await acquireEditLockForPath(path);
           const savedAt = new Date().toISOString();
           setLastExplicitSaveAt(savedAt);
           const latestHash = projectContentHash(
@@ -1114,6 +1140,9 @@ export default function App() {
           return false;
         }
       } catch (error) {
+        if (newLock && newLockPath) {
+          await releaseProjectEditLock(newLockPath, newLock.lock_id).catch(() => undefined);
+        }
         setSaveStatus("error");
         setAppError(classifyAppError(error, "プロジェクト別名保存"));
         return false;
@@ -1122,7 +1151,7 @@ export default function App() {
       }
     });
   }, [
-    acquireEditLockForPath,
+    askEditLockChoice,
     enqueueSave,
     refreshBackupFiles,
     releaseActiveEditLock,

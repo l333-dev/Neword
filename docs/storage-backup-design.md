@@ -73,12 +73,15 @@ See [data-management.md](./data-management.md) for reset scopes and cleanup rule
 
 DOCX import/export code is split out of the initial application chunk. Mammoth.js, JSZip-backed import helpers, docx.js, and export writer code are loaded only when the user starts DOCX import or export.
 
-Measured Vite output in stage 12:
+Measured Vite output in stage 15:
 
-- Before: initial `index` chunk about 1,761kB.
-- After: initial `index-JmDPcDu3.js` 841,310 bytes, gzip 255.42kB.
-- DOCX import: `importDocx-4yvJLEOG.js` 546,209 bytes, gzip 137.85kB.
-- DOCX export writer: `docxWriter-CW_tUTP2.js` 378,938 bytes, gzip 107.12kB.
-- Export model conversion: `exportDocument-BEqhxTC8.js` 3,132 bytes, gzip 1.17kB.
+- Initial app: `index-FYoeS3kG.js` 148.30kB, gzip 42.19kB.
+- React vendor: `vendor-react-D1jnLztF.js` 189.63kB, gzip 59.66kB.
+- Tiptap vendor: `vendor-tiptap-BJRjEndB.js` 435.12kB, gzip 136.18kB.
+- Validation vendor: `vendor-validation-Cr3_Bknf.js` 96.07kB, gzip 28.63kB.
+- DOCX import model: `importDocx-D09aH4FY.js` 30.39kB, gzip 9.64kB.
+- DOCX export writer: `docxWriter-EN6tWgab.js` 378.98kB, gzip 107.15kB.
+- Mammoth browser chunk: `mammoth.browser-jIKWjR9m.js` 491.70kB, gzip 118.73kB.
+- Import Worker: `importWorker-DWynHG8w.js` 559.98kB.
 
-The remaining Vite warning is the DOCX import chunk exceeding 500kB. It is no longer part of first launch.
+The production frontend build currently completes without Vite chunk-size warnings. The import Worker remains larger than 500kB because Mammoth conversion runs off the UI thread, but Vite reports it as a worker asset rather than an initial application chunk. The warning was fixed by real code splitting through `build.rolldownOptions.output.codeSplitting`, not by raising `chunkSizeWarningLimit`.

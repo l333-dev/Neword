@@ -273,6 +273,13 @@ function docxNameFromPath(path: string): string {
 }
 
 export async function saveProjectWithDialog(project: DocumentProject): Promise<string | null> {
+  const path = await selectProjectSavePath(project);
+  if (!path) return null;
+  await saveProjectToPath(path, project);
+  return path;
+}
+
+export async function selectProjectSavePath(project: DocumentProject): Promise<string | null> {
   const selectedPath = await save({
     title: "プロジェクトを保存",
     defaultPath: `${project.metadata.title || "document"}.${PROJECT_EXTENSION}`,
@@ -282,14 +289,7 @@ export async function saveProjectWithDialog(project: DocumentProject): Promise<s
     ],
   });
   if (!selectedPath) return null;
-  const path = projectSavePathFromDialogPath(selectedPath);
-  await invoke("write_text_file_atomic_with_backup", {
-    path,
-    contents: serializeProject(project),
-    backupLimit: PROJECT_BACKUP_LIMIT,
-    backupExisting: true,
-  });
-  return path;
+  return projectSavePathFromDialogPath(selectedPath);
 }
 
 export async function saveProjectToPath(path: string, project: DocumentProject): Promise<void> {

@@ -1,7 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createNewProject } from "../src/document-model/schema";
-import { saveProjectToPath, saveProjectWithDialog } from "../src/project/fileAccess";
+import {
+  saveProjectToPath,
+  saveProjectWithDialog,
+  selectProjectSavePath,
+} from "../src/project/fileAccess";
 import { serializeProject } from "../src/project/serialization";
 
 const mocks = vi.hoisted(() => ({
@@ -66,5 +70,14 @@ describe("project save file access", () => {
       "write_text_file_atomic_with_backup",
       expect.objectContaining({ path: "/tmp/日本語 名前.neword" }),
     );
+  });
+
+  it("can select a save path without writing, so callers can check edit locks first", async () => {
+    const project = createNewProject(new Date("2026-07-23T00:00:00.000Z"));
+    mocks.save.mockResolvedValue("/tmp/locked-project");
+
+    await expect(selectProjectSavePath(project)).resolves.toBe("/tmp/locked-project.neword");
+
+    expect(mocks.invoke).not.toHaveBeenCalled();
   });
 });

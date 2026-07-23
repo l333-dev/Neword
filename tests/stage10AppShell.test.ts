@@ -93,6 +93,24 @@ describe("stage 10 error display", () => {
       "A".repeat(160),
     );
   });
+
+  it("keeps structured atomic save errors visible instead of using the unknown fallback", () => {
+    const error = classifyAppError(
+      {
+        code: "file.atomic_rename_failed",
+        operation: "atomic_write.rename",
+        path: "/tmp/日本語 名前.neword",
+        human_readable_message: "atomic保存用の一時ファイルを保存先へ置換できませんでした。",
+        technical_cause: "Is a directory",
+      },
+      "プロジェクト別名保存",
+    );
+
+    expect(error.kind).toBe("cannot_write_destination");
+    expect(error.summary).not.toBe("不明なエラーが発生しました。");
+    expect(error.technicalDetails).toContain("atomic_write.rename");
+    expect(error.technicalDetails).toContain("/tmp/日本語 名前.neword");
+  });
 });
 
 describe("stage 10 onboarding", () => {

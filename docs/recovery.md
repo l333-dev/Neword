@@ -32,6 +32,8 @@ The standard project extension is `.neword`. The file contents are still version
 
 Legacy `.json` projects can be opened. Opening or saving a legacy path does not silently change the user-selected path, but save-as defaults to `.neword`.
 
+When the native save dialog returns a path without `.neword` or `.json`, the frontend appends `.neword` before invoking the Rust write command. Spaces and non-ASCII characters in the selected file name are preserved.
+
 ## Recovery
 
 Recovery writes `AutosaveEnvelope` JSON files. The envelope contains recovery metadata, a content hash, revision, timestamps, optional source path, and the `DocumentProject`.
@@ -56,7 +58,7 @@ Migration rules:
 
 ## Backups
 
-Explicit project save uses the backup-capable atomic command. If the target file exists and can be read as JSON, the old content is copied to app data `backups/<source-path-hash>/backup-*.neword` before replacement.
+Explicit project save uses the backup-capable atomic command. If the target file already exists and can be read as JSON, the old content is copied to app data `backups/<source-path-hash>/backup-*.neword` before replacement. First save to a new path, such as `test.neword`, does not enter backup creation.
 
 Backup metadata is stored in a manifest next to each backup group. It records original path, path hash, save time, formatVersion, title, byte size, and content hash. The current retention limit is 5 generations per project path hash. Duplicate content is not backed up repeatedly.
 
@@ -69,16 +71,16 @@ Opening a backup loads it as an unsaved recovered project with no active save pa
 The Rust file command:
 
 1. Validates the target parent directory.
-2. Serializes and validates JSON for project/recovery writes.
-3. Creates a hidden temporary file in the target directory.
-4. Writes all bytes.
-5. Flushes and syncs the file.
-6. Creates a backup for explicit project saves when applicable.
+2. Validates JSON for project/recovery writes.
+3. Creates a backup for explicit project saves only when the target path already exists.
+4. Creates a hidden temporary file in the target directory.
+5. Writes all bytes.
+6. Flushes and syncs the file.
 7. Renames the temporary file over the target.
 8. Removes the temporary file on failure where possible.
 9. Updates the UI saved state only after success.
 
-Errors are returned as structured values with `code`, `operation`, `path`, `retryable`, a human-readable message, and a technical cause. Document text, Tiptap JSON, and image Base64 are not included in error messages.
+Errors are returned as structured values with `code`, `operation`, `path`, `retryable`, a human-readable message, and a technical cause. Atomic save errors keep the failed stage in `operation`, such as `atomic_write.create_temp`, `atomic_write.write`, `atomic_write.sync`, or `atomic_write.rename`. Document text, Tiptap JSON, and image Base64 are not included in error messages.
 
 ## External Changes
 

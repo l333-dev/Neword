@@ -235,22 +235,62 @@ fn now_millis() -> Result<u128, FileCommandError> {
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), FileCommandError> {
     ensure_parent(path, "atomic_write")?;
     let temp_path = temp_path_for(path)?;
-    let write_result = (|| {
-        let mut file = fs::File::create(&temp_path).map_err(|error| error.to_string())?;
-        file.write_all(bytes).map_err(|error| error.to_string())?;
-        file.flush().map_err(|error| error.to_string())?;
-        file.sync_all().map_err(|error| error.to_string())?;
-        fs::rename(&temp_path, path).map_err(|error| error.to_string())
-    })();
-    if let Err(message) = write_result {
+    let mut file = fs::File::create(&temp_path).map_err(|error| {
+        file_error(
+            "file.atomic_create_temp_failed",
+            "atomic_write.create_temp",
+            Some(&temp_path),
+            true,
+            "atomic保存用の一時ファイルを作成できませんでした。",
+            Some(error.to_string()),
+        )
+    })?;
+    if let Err(error) = file.write_all(bytes) {
+        drop(file);
         let _ = fs::remove_file(&temp_path);
         return Err(file_error(
-            "file.atomic_write_failed",
-            "atomic_write",
+            "file.atomic_write_bytes_failed",
+            "atomic_write.write",
+            Some(&temp_path),
+            true,
+            "atomic保存用の一時ファイルへ書き込めませんでした。",
+            Some(error.to_string()),
+        ));
+    }
+    if let Err(error) = file.flush() {
+        drop(file);
+        let _ = fs::remove_file(&temp_path);
+        return Err(file_error(
+            "file.atomic_flush_failed",
+            "atomic_write.flush",
+            Some(&temp_path),
+            true,
+            "atomic保存用の一時ファイルをflushできませんでした。",
+            Some(error.to_string()),
+        ));
+    }
+    if let Err(error) = file.sync_all() {
+        drop(file);
+        let _ = fs::remove_file(&temp_path);
+        return Err(file_error(
+            "file.atomic_sync_failed",
+            "atomic_write.sync",
+            Some(&temp_path),
+            true,
+            "atomic保存用の一時ファイルをsyncできませんでした。",
+            Some(error.to_string()),
+        ));
+    }
+    drop(file);
+    if let Err(error) = fs::rename(&temp_path, path) {
+        let _ = fs::remove_file(&temp_path);
+        return Err(file_error(
+            "file.atomic_rename_failed",
+            "atomic_write.rename",
             Some(path),
             true,
-            "ファイルのatomic保存に失敗しました。",
-            Some(message),
+            "atomic保存用の一時ファイルを保存先へ置換できませんでした。",
+            Some(error.to_string()),
         ));
     }
     Ok(())
@@ -488,6 +528,10 @@ fn create_backup(
     Ok(list_backup_infos_in_dir(&dir)
         .into_iter()
         .find(|info| info.file_name == file_name))
+}
+
+fn should_create_backup_for_save(path: &Path, backup_existing: bool) -> bool {
+    backup_existing && path.exists()
 }
 
 fn rotate_backup_manifest(dir: &Path, manifest: &mut BackupManifest, limit: usize) {
@@ -757,6 +801,7 @@ pub fn write_text_file_atomic_with_backup(
     path: String,
     contents: String,
     backup_limit: usize,
+    backup_existing: bool,
 ) -> Result<(), FileCommandError> {
     let path = PathBuf::from(path);
     serde_json::from_str::<serde_json::Value>(&contents).map_err(|error| {
@@ -769,7 +814,9 @@ pub fn write_text_file_atomic_with_backup(
             Some(error.to_string()),
         )
     })?;
-    let _backup = create_backup(&app, &path, backup_limit)?;
+    if should_create_backup_for_save(&path, backup_existing) {
+        let _backup = create_backup(&app, &path, backup_limit)?;
+    }
     write_atomic(&path, contents.as_bytes())?;
     Ok(())
 }
@@ -1522,6 +1569,46 @@ mod tests {
             Err(error) if error.code == "path.parent_missing"
         ));
         assert!(!path.exists());
+        fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn atomic_write_reports_rename_stage_without_losing_existing_directory(
+    ) -> Result<(), Box<dyn Error>> {
+        let dir = temp_dir("rename-stage")?;
+        let path = dir.join("日本語 名前.neword");
+        fs::create_dir(&path)?;
+
+        let result =
+            super::write_text_file_atomic(path.to_string_lossy().to_string(), "data".into());
+
+        assert!(matches!(
+            result,
+            Err(error)
+                if error.code == "file.atomic_rename_failed"
+                    && error.operation == "atomic_write.rename"
+        ));
+        assert!(path.is_dir());
+        let temp_files = fs::read_dir(&dir)?
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().ends_with(".tmp"))
+            .count();
+        assert_eq!(temp_files, 0);
+        fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn backup_is_only_created_for_existing_overwrite_targets() -> Result<(), Box<dyn Error>> {
+        let dir = temp_dir("backup-decision")?;
+        let first_save = dir.join("test.neword");
+        assert!(!super::should_create_backup_for_save(&first_save, true));
+
+        fs::write(&first_save, "{}")?;
+        assert!(super::should_create_backup_for_save(&first_save, true));
+        assert!(!super::should_create_backup_for_save(&first_save, false));
+
         fs::remove_dir_all(dir)?;
         Ok(())
     }

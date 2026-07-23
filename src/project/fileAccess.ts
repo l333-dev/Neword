@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { open, save } from "@tauri-apps/plugin-dialog";
 
 import type { DocumentProject } from "../document-model/schema";
+import { projectSavePathFromDialogPath } from "./saveSafety";
 import { deserializeProject, serializeProject } from "./serialization";
 
 export type SaveStatus =
@@ -272,7 +273,7 @@ function docxNameFromPath(path: string): string {
 }
 
 export async function saveProjectWithDialog(project: DocumentProject): Promise<string | null> {
-  const path = await save({
+  const selectedPath = await save({
     title: "プロジェクトを保存",
     defaultPath: `${project.metadata.title || "document"}.${PROJECT_EXTENSION}`,
     filters: [
@@ -280,11 +281,13 @@ export async function saveProjectWithDialog(project: DocumentProject): Promise<s
       { name: "Legacy JSON Project", extensions: [LEGACY_PROJECT_EXTENSION] },
     ],
   });
-  if (!path) return null;
+  if (!selectedPath) return null;
+  const path = projectSavePathFromDialogPath(selectedPath);
   await invoke("write_text_file_atomic_with_backup", {
     path,
     contents: serializeProject(project),
     backupLimit: PROJECT_BACKUP_LIMIT,
+    backupExisting: true,
   });
   return path;
 }
@@ -294,6 +297,7 @@ export async function saveProjectToPath(path: string, project: DocumentProject):
     path,
     contents: serializeProject(project),
     backupLimit: PROJECT_BACKUP_LIMIT,
+    backupExisting: true,
   });
 }
 

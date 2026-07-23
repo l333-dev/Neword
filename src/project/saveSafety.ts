@@ -13,6 +13,14 @@ export function shouldSuggestNewordExtension(path: string): boolean {
   return path.toLowerCase().endsWith(".json");
 }
 
+export function projectSavePathFromDialogPath(path: string): string {
+  const normalized = path.replaceAll("\\", "/");
+  const slashIndex = normalized.lastIndexOf("/");
+  const fileName = normalized.slice(slashIndex + 1).toLowerCase();
+  if (fileName.endsWith(".neword") || fileName.endsWith(".json")) return path;
+  return `${path}.neword`;
+}
+
 export function hasExternalFileChange(
   previous: FileSnapshot | null,
   current: FileSnapshot | null,

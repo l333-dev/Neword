@@ -145,6 +145,14 @@ The settings panel exposes selected-cell settings for background color and verti
 
 Image editing stores binary data only in `DocumentProject.assets`. The selected image settings panel edits the image node's `assetId`, width and height in pixels, `keepAspectRatio`, left/center/right alignment, and alt text. Width and height changes use numeric input; when aspect ratio lock is enabled, changing one side recalculates the other side from the current image size. Reset uses the asset's original dimensions and fits the image within the editor page width.
 
+## Search, Replace, and Statistics
+
+Stage 13 adds document search and replace through the editor document model, not through saved HTML string replacement. Search supports Japanese literal text, full-width and half-width characters, case sensitivity, ASCII whole-word matching, and regular expressions. Highlights are ProseMirror decorations and are never saved to `.neword` or DOCX.
+
+Replace current and replace all are editor transactions and can be undone. Read-only mode disables replacement.
+
+Document statistics include characters with/without whitespace, ASCII word count, Japanese character count, paragraphs, headings, tables, images, list items, page breaks, and estimated reading time. Japanese word segmentation is not claimed; Japanese is counted as characters.
+
 Image insertion uses a local file dialog and supports PNG, JPEG, GIF, and WebP for project storage. External URL images are never fetched. Unsupported formats, oversized files, oversized dimensions, corrupted image data, and image read failures are shown to the user without including document text or base64 data.
 
 When a new document is created, the app copies the current new-document defaults into `DocumentProject.documentDefaults`. After creation, those defaults belong to the document.

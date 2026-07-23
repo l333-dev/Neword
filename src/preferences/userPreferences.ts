@@ -19,6 +19,7 @@ export const UserPreferencesWarningCodeSchema = z.enum([
   "INVALID_PREFERENCE_VALUE_REPLACED",
   "PREFERENCES_STORAGE_UNAVAILABLE",
   "PREFERENCES_SAVE_FAILED",
+  "PREFERENCES_QUOTA_EXCEEDED",
 ]);
 
 export type UserPreferencesWarningCode = z.infer<typeof UserPreferencesWarningCodeSchema>;

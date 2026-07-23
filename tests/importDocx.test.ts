@@ -181,6 +181,50 @@ describe("DOCX fixture import", () => {
     );
   });
 
+  it("converts aggregated unsupported feature metadata into safe ImportWarnings", async () => {
+    const buffer = await readFile(fixturePath);
+    const inspection = await inspectFixture(buffer);
+    inspection.unsupported_features = [
+      {
+        code: "docx.unsupported_math",
+        category: "unsupported-element",
+        severity: "warning",
+        count: 2,
+        affected_part: "word/document.xml",
+        can_continue: true,
+        recommendation: "数式は編集可能な数式として保持されません。",
+      },
+      {
+        code: "docx.unsupported_math",
+        category: "unsupported-element",
+        severity: "warning",
+        count: 3,
+        affected_part: "word/document.xml",
+        can_continue: true,
+        recommendation: "数式は編集可能な数式として保持されません。",
+      },
+    ];
+    const bytes = new Uint8Array(buffer);
+    const result = await convertDocxArrayBufferToImportResult({
+      arrayBuffer: bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength),
+      sourceInfo: sourceInfo(buffer.byteLength),
+      inspection,
+    });
+    const mathWarnings = result.warnings.filter(
+      (warning) => warning.code === "docx.unsupported_math",
+    );
+
+    expect(mathWarnings).toHaveLength(1);
+    expect(mathWarnings[0]).toEqual(
+      expect.objectContaining({
+        category: "unsupported-element",
+        severity: "warning",
+        affectedPart: "word/document.xml",
+      }),
+    );
+    expect(JSON.stringify(mathWarnings[0])).not.toContain("<m:oMath");
+  });
+
   it("creates an image asset from a PNG DOCX image", async () => {
     const result = await importFixture(pngFixturePath);
 
@@ -620,6 +664,7 @@ async function inspectFixture(buffer: Buffer): Promise<DocxInspection> {
     sections: [],
     paragraphs: [],
     table_warnings: [],
+    unsupported_features: [],
     entries,
     warnings: [],
   };

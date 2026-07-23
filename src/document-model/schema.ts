@@ -23,8 +23,31 @@ export const BlockTypeSchema = z.enum([
 
 export const ImportWarningSchema = z.object({
   code: z.string(),
+  category: z
+    .enum([
+      "unsupported-element",
+      "unsupported-style",
+      "lost-formatting",
+      "approximated-layout",
+      "external-image-blocked",
+      "macro-detected",
+      "malformed-relationship",
+      "oversized-asset",
+      "unsupported-numbering",
+      "unsupported-table-feature",
+      "unsupported-header-footer",
+      "unsupported-section",
+      "import-recovery",
+      "general",
+    ])
+    .optional(),
   severity: z.enum(["info", "warning", "error"]),
   message: z.string(),
+  humanReadableReason: z.string().optional(),
+  affectedPart: z.string().optional(),
+  sourceReference: z.string().optional(),
+  canContinue: z.boolean().optional(),
+  recommendation: z.string().optional(),
   location: z.string().optional(),
   id: z.string().optional(),
   source: z.string().optional(),

@@ -1,0 +1,10 @@
+[Desktop Entry]
+Categories={{categories}}
+Comment={{comment}}
+Exec={{exec}} %F
+StartupWMClass=personal-doc-editor
+Icon={{icon}}
+Name={{name}}
+Terminal=false
+Type=Application
+MimeType=application/x-neword-project;

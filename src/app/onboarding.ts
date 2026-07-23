@@ -1,5 +1,11 @@
 import { z } from "zod";
 
+import {
+  createStorageEnvelope,
+  readStorageEnvelope,
+  StorageEnvelopeSchema,
+} from "../preferences/localStorageEnvelope";
+
 export const ONBOARDING_STORAGE_KEY = "neword.onboarding.v1";
 
 const OnboardingStateSchema = z.object({
@@ -9,6 +15,7 @@ const OnboardingStateSchema = z.object({
 });
 
 export type OnboardingState = z.infer<typeof OnboardingStateSchema>;
+export const OnboardingStorageEnvelopeSchema = StorageEnvelopeSchema(OnboardingStateSchema);
 
 export interface OnboardingStorage {
   load(key: string): string | null;
@@ -46,7 +53,12 @@ export function loadOnboardingState(
   try {
     const raw = storage.load(ONBOARDING_STORAGE_KEY);
     if (!raw) return defaultOnboardingState();
-    const parsed = OnboardingStateSchema.safeParse(JSON.parse(raw) as unknown);
+    const parsedValue = JSON.parse(raw) as unknown;
+    const enveloped = readStorageEnvelope(parsedValue, OnboardingStateSchema);
+    if (enveloped === null) return defaultOnboardingState();
+    const parsed = OnboardingStateSchema.safeParse(
+      enveloped.enveloped ? enveloped.data : enveloped.data,
+    );
     return parsed.success ? parsed.data : defaultOnboardingState();
   } catch {
     return defaultOnboardingState();
@@ -68,7 +80,7 @@ export function saveOnboardingState(
   const parsed = OnboardingStateSchema.safeParse(state);
   if (!parsed.success) return false;
   try {
-    storage.save(ONBOARDING_STORAGE_KEY, JSON.stringify(parsed.data));
+    storage.save(ONBOARDING_STORAGE_KEY, JSON.stringify(createStorageEnvelope(parsed.data)));
     return true;
   } catch {
     return false;

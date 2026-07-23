@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties }
 import { EditorContent, useEditor } from "@tiptap/react";
 import type { Content, Editor } from "@tiptap/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { listen } from "@tauri-apps/api/event";
 
 import {
   APP_IDENTIFIER,
@@ -12,6 +13,7 @@ import {
   UNSUPPORTED_FEATURES,
 } from "./app/appInfo";
 import { classifyAppError, type UserFacingError } from "./app/appErrors";
+import { commandFromKeyboardEvent, isAppCommand, type AppCommand } from "./app/appCommands";
 import {
   dismissFirstRunGuide,
   loadOnboardingState,
@@ -38,30 +40,66 @@ import { createBlankDocumentProject } from "./document-model/newProject";
 import { trimTrailingEmptyParagraphsFromContent } from "./features/editor/contentCleanup";
 import { createEditorExtensions } from "./features/editor/editorConfig";
 import { EditorToolbar } from "./features/editor/EditorToolbar";
-import { countCharacters, createOutline } from "./features/editor/outline";
-import { useResolvedColorMode } from "./features/preferences/useResolvedColorMode";
 import {
-  convertDocxBase64ToImportResult,
-  type ImportPreview,
-} from "./features/import-docx/importDocx";
-import { exportDocumentToDocxBase64 } from "./features/export-docx/docxWriter";
-import { projectToExportDocument } from "./features/export-docx/exportDocument";
+  countCharacters,
+  createDocumentStatistics,
+  createOutline,
+  type DocumentStatistics,
+  type OutlineItem,
+} from "./features/editor/outline";
+import {
+  findSearchMatches,
+  replaceMatches,
+  updateSearchHighlight,
+  type SearchMatch,
+  type SearchOptions,
+} from "./features/editor/search";
+import { useResolvedColorMode } from "./features/preferences/useResolvedColorMode";
+import type { ImportPreview } from "./features/import-docx/importDocx";
 import {
   openImageWithDialog,
+  cleanupStaleEditLocks,
+  cleanupTemporaryFiles,
+  deleteAllBackups,
+  deleteBackupFile,
+  checkProjectEditLock,
+  createProjectEditLock,
   deleteRecoveryFile,
+  getAppDataPaths,
+  getFileSnapshot,
+  inspectOpenPath,
   listRecoveryFiles,
-  openDocxWithDialog,
+  listBackupFiles,
+  listLegacyRecoveryFiles,
+  migrateLegacyRecoveryFile,
+  selectDocxPath,
+  openDocxFromPathCancellable,
+  cancelDocxImport,
   openProjectFromPath,
   openProjectWithDialog,
+  openAppDataFolder,
+  readBackupFile,
+  readLegacyRecoveryFile,
   readRecoveryFile,
   recoveryDirPath,
+  recoveryMigrationState,
+  refreshProjectEditLock,
+  releaseProjectEditLock,
   saveProjectToPath,
   saveProjectWithDialog,
+  startupOpenPaths,
+  writeRecoveryMigrationState,
   writeProjectAutosave,
   writeBinaryFileWithDialog,
+  type AppDataPaths,
+  type BackupFileInfo,
+  type FileSnapshot,
+  type ProjectEditLock,
+  type ProjectEditLockStatus,
+  type OpenDocxResult,
   type SaveStatus,
 } from "./project/fileAccess";
-import { markProjectUpdated } from "./project/serialization";
+import { deserializeProject, markProjectUpdated } from "./project/serialization";
 import {
   addRecentProject,
   clearRecentProjects,
@@ -83,6 +121,21 @@ import {
   type RecoveryCandidate,
 } from "./project/recovery";
 import {
+  classifyDroppedOrOpenedPath,
+  estimateSerializedSizeBytes,
+  shouldSuggestNewordExtension,
+} from "./project/saveSafety";
+import {
+  createExternalConflictRequest,
+  type ExternalConflictChoice,
+  type ExternalConflictRequest,
+} from "./project/externalConflict";
+import {
+  lockStatusMessage,
+  shouldWarnAboutEditLock,
+  type EditLockChoice,
+} from "./project/editLocks";
+import {
   documentDefaultsFromEditingPreferences,
   type UserEditingPreferences,
 } from "./stores/editingPreferences";
@@ -90,6 +143,8 @@ import { createPreferenceCssVariables } from "./preferences/appearance";
 import { layoutGridColumns, resolveLayoutRegions, type LayoutRegion } from "./preferences/layout";
 import {
   loadUserPreferences,
+  resetUserPreferenceCategory,
+  resetUserPreferences,
   saveUserPreferences,
   updateUserPreferences,
   type UserPreferences,
@@ -123,6 +178,41 @@ type UnsavedDialogState = {
   actionLabel: string;
   resolve: (choice: UnsavedChoice) => void;
 } | null;
+
+type EditLockDialogState = {
+  path: string;
+  status: ProjectEditLockStatus;
+  resolve: (choice: EditLockChoice) => void;
+} | null;
+
+type EditLockOpenDecision = "editable" | "read-only" | "copy" | "cancel";
+
+type DocxImportStage =
+  | "idle"
+  | "file-check"
+  | "zip-inspection"
+  | "ooxml-extraction"
+  | "asset-extraction"
+  | "mammoth"
+  | "sanitize"
+  | "classification"
+  | "model"
+  | "preview"
+  | "cancelled";
+
+const DOCX_IMPORT_STAGE_LABELS: Record<DocxImportStage, string> = {
+  idle: "待機中",
+  "file-check": "ファイル確認",
+  "zip-inspection": "ZIP安全検査",
+  "ooxml-extraction": "OOXML情報抽出",
+  "asset-extraction": "画像アセット抽出",
+  mammoth: "Mammoth HTML変換",
+  sanitize: "HTMLサニタイズ",
+  classification: "文書分類",
+  model: "内部モデル生成",
+  preview: "プレビュー準備",
+  cancelled: "キャンセル済み",
+};
 
 const defaultTableCellSettings: TableCellSettings = {
   backgroundColor: null,
@@ -166,6 +256,7 @@ export default function App() {
   const [selectedParagraphSettings, setSelectedParagraphSettings] =
     useState<ParagraphSettings>(defaultParagraphSettings);
   const [selectedParagraphEditable, setSelectedParagraphEditable] = useState(false);
+  const [selectionAnchor, setSelectionAnchor] = useState(0);
   const [selectedTableCellSettings, setSelectedTableCellSettings] =
     useState<TableCellSettings>(defaultTableCellSettings);
   const [selectedTableCellEditable, setSelectedTableCellEditable] = useState(false);
@@ -179,16 +270,50 @@ export default function App() {
   const [preview, setPreview] = useState<ImportPreview | null>(null);
   const [onlyWarnings, setOnlyWarnings] = useState(false);
   const [onlyUncertain, setOnlyUncertain] = useState(false);
+  const [warningSeverityFilter, setWarningSeverityFilter] = useState<
+    "all" | "info" | "warning" | "error"
+  >("all");
+  const [warningCategoryFilter, setWarningCategoryFilter] = useState("all");
   const [searchTerm, setSearchTerm] = useState("");
   const [replaceTerm, setReplaceTerm] = useState("");
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchOptions, setSearchOptions] = useState<SearchOptions>({
+    caseSensitive: false,
+    wholeWord: false,
+    regex: false,
+  });
+  const [searchMatches, setSearchMatches] = useState<SearchMatch[]>([]);
+  const [currentSearchIndex, setCurrentSearchIndex] = useState(-1);
+  const [searchError, setSearchError] = useState<string | null>(null);
+  const [lastReplaceCount, setLastReplaceCount] = useState<number | null>(null);
   const [lastAutosaveAt, setLastAutosaveAt] = useState<string | null>(null);
   const [lastExplicitSaveAt, setLastExplicitSaveAt] = useState<string | null>(null);
   const [recoveryCandidates, setRecoveryCandidates] = useState<RecoveryCandidate[]>([]);
+  const [appDataPaths, setAppDataPaths] = useState<AppDataPaths | null>(null);
+  const [backupFiles, setBackupFiles] = useState<BackupFileInfo[]>([]);
+  const [dropActive, setDropActive] = useState(false);
+  const [lastFileSnapshot, setLastFileSnapshot] = useState<FileSnapshot | null>(null);
+  const [savingSizeBytes, setSavingSizeBytes] = useState<number | null>(null);
+  const [readOnlyReason, setReadOnlyReason] = useState<string | null>(null);
+  const [activeEditLock, setActiveEditLock] = useState<ProjectEditLock | null>(null);
+  const [externalConflict, setExternalConflict] = useState<ExternalConflictRequest | null>(null);
+  const [editLockDialog, setEditLockDialog] = useState<EditLockDialogState>(null);
+  const [resolveExternalConflict, setResolveExternalConflict] = useState<
+    ((choice: ExternalConflictChoice) => void) | null
+  >(null);
+  const [docxModuleStatus, setDocxModuleStatus] = useState<"idle" | "loading" | "error">("idle");
+  const [docxImportStage, setDocxImportStage] = useState<DocxImportStage>("idle");
+  const [docxImportStartedAt, setDocxImportStartedAt] = useState<number | null>(null);
+  const [docxImportCancelToken, setDocxImportCancelToken] = useState<string | null>(null);
   const imageInputRef = useRef<HTMLInputElement>(null);
   const shouldFocusSettingsRef = useRef(false);
   const editingPreferencesRef = useRef(editingPreferences);
   const latestProjectRef = useRef(project);
   const latestProjectPathRef = useRef(projectPath);
+  const lastFileSnapshotRef = useRef<FileSnapshot | null>(null);
+  const activeEditLockRef = useRef<ProjectEditLock | null>(null);
+  const docxImportCancelTokenRef = useRef<string | null>(null);
+  const activeImportWorkerCancelRef = useRef<(() => void) | null>(null);
   const saveQueueRef = useRef<Promise<void>>(Promise.resolve());
   const closeInProgressRef = useRef(false);
   const autosaveRevisionRef = useRef(0);
@@ -196,11 +321,14 @@ export default function App() {
   editingPreferencesRef.current = editingPreferences;
   latestProjectRef.current = project;
   latestProjectPathRef.current = projectPath;
+  lastFileSnapshotRef.current = lastFileSnapshot;
+  activeEditLockRef.current = activeEditLock;
   const extensions = useMemo(() => createEditorExtensions(() => editingPreferencesRef.current), []);
 
   const editor = useEditor({
     extensions,
     content: project.editorContent as Content,
+    editable: readOnlyReason === null,
     editorProps: {
       attributes: {
         "aria-label": "文書本文",
@@ -214,6 +342,7 @@ export default function App() {
       setSelectedTableCellEditable(isTableCellEditable(currentEditor));
       setSelectedImageSettings(imageSettingsFromEditor(currentEditor, project.assets));
       setSelectedImageEditable(currentEditor.isActive("image"));
+      setSelectionAnchor(currentEditor.state.selection.from);
       setProject((current) =>
         markProjectUpdated({
           ...current,
@@ -229,14 +358,47 @@ export default function App() {
       setSelectedTableCellEditable(isTableCellEditable(currentEditor));
       setSelectedImageSettings(imageSettingsFromEditor(currentEditor, project.assets));
       setSelectedImageEditable(currentEditor.isActive("image"));
+      setSelectionAnchor(currentEditor.state.selection.from);
     },
   });
 
-  const outline = useMemo(() => createOutline(project.editorContent), [project.editorContent]);
+  useEffect(() => {
+    const editable = readOnlyReason === null;
+    if (editor && editor.isEditable !== editable) editor.setEditable(editable);
+  }, [editor, readOnlyReason]);
+
+  const outline = useMemo<OutlineItem[]>(() => {
+    if (!editor) return createOutline(project.editorContent);
+    const items: OutlineItem[] = [];
+    editor.state.doc.descendants((node, position) => {
+      if (node.type.name !== "heading") return true;
+      const level = typeof node.attrs.level === "number" ? node.attrs.level : 1;
+      items.push({
+        id: `heading-${position}`,
+        level,
+        text: node.textContent.trim() || "(無題の見出し)",
+        position,
+      });
+      return false;
+    });
+    return items;
+  }, [editor, project.editorContent]);
   const characterCount = useMemo(
     () => countCharacters(project.editorContent),
     [project.editorContent],
   );
+  const documentStatistics = useMemo<DocumentStatistics>(
+    () => createDocumentStatistics(project.editorContent),
+    [project.editorContent],
+  );
+  const activeOutlineItemId = useMemo(() => {
+    let active: OutlineItem | null = null;
+    for (const item of outline) {
+      if (item.position === undefined || item.position > selectionAnchor) continue;
+      if (!active || (item.position ?? 0) >= (active.position ?? 0)) active = item;
+    }
+    return active?.id ?? null;
+  }, [outline, selectionAnchor]);
   const resolvedColorMode = useResolvedColorMode(userPreferences.appearance.colorMode);
   const appVisualStyle = useMemo(
     () => createPreferenceCssVariables(userPreferences, resolvedColorMode) as CSSProperties,
@@ -262,6 +424,27 @@ export default function App() {
   );
 
   useEffect(() => {
+    if (!editor || !searchOpen || searchTerm.length === 0) {
+      if (editor) updateSearchHighlight(editor, [], -1);
+      setSearchMatches([]);
+      setCurrentSearchIndex(-1);
+      setSearchError(null);
+      return;
+    }
+    const result = findSearchMatches(editor.state.doc, searchTerm, searchOptions);
+    setSearchMatches(result.matches);
+    setSearchError(
+      result.error ?? (result.truncated ? "一致が多いため1000件まで表示します。" : null),
+    );
+    const nextIndex =
+      result.matches.length > 0
+        ? Math.min(Math.max(currentSearchIndex, 0), result.matches.length - 1)
+        : -1;
+    setCurrentSearchIndex(nextIndex);
+    updateSearchHighlight(editor, result.matches, nextIndex);
+  }, [currentSearchIndex, editor, project.editorContent, searchOpen, searchOptions, searchTerm]);
+
+  useEffect(() => {
     const result = saveUserPreferences(userPreferences);
     if (!result.ok) {
       setPreferenceSaveError("個人設定の保存に失敗しました。");
@@ -284,13 +467,97 @@ export default function App() {
 
   useEffect(() => {
     let cancelled = false;
-    recoveryDirPath()
-      .then((path) => {
-        if (!cancelled) setRecoveryDirectory(path);
+    getAppDataPaths()
+      .then((paths) => {
+        if (!cancelled) {
+          setAppDataPaths(paths);
+          setRecoveryDirectory(paths.recovery_dir);
+        }
       })
-      .catch(() => {
-        if (!cancelled) setRecoveryDirectory(null);
+      .catch(async () => {
+        try {
+          const path = await recoveryDirPath();
+          if (!cancelled) setRecoveryDirectory(path);
+        } catch {
+          if (!cancelled) setRecoveryDirectory(null);
+        }
       });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const refreshBackupFiles = useCallback(async () => {
+    try {
+      setBackupFiles(await listBackupFiles());
+    } catch {
+      setBackupFiles([]);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshBackupFiles();
+  }, [refreshBackupFiles]);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function migrateLegacyRecovery() {
+      try {
+        const state = await recoveryMigrationState();
+        if (state.completed) return;
+        const legacyFiles = await listLegacyRecoveryFiles();
+        let migratedCount = 0;
+        let invalidCount = 0;
+        const warnings: string[] = [];
+        for (const file of legacyFiles) {
+          try {
+            const text = await readLegacyRecoveryFile(file.name);
+            const candidate = recoveryCandidateFromAutosave(file, text, latestProjectRef.current);
+            if (!candidate.valid) {
+              invalidCount += 1;
+              warnings.push(`invalid:${file.name}`);
+              continue;
+            }
+            await migrateLegacyRecoveryFile(file.name);
+            migratedCount += 1;
+          } catch {
+            invalidCount += 1;
+            warnings.push(`invalid:${file.name}`);
+          }
+        }
+        await writeRecoveryMigrationState({
+          completed: true,
+          checked_at: new Date().toISOString(),
+          migrated_count: migratedCount,
+          invalid_count: invalidCount,
+          warnings,
+        });
+        if (!cancelled && invalidCount > 0) {
+          setAppError({
+            kind: "unknown",
+            title: "旧リカバリ移行の一部を確認できませんでした",
+            summary: `${invalidCount}件の旧リカバリデータが破損または不正な形式でした。旧ファイルは削除していません。`,
+            currentContentState: "現在開いている文書は変更していません。",
+            dataLossRisk: "破損候補は自動削除していないため、必要なら手動で確認できます。",
+            nextActions: ["リカバリ管理を確認する", "通常保存済みプロジェクトを開く"],
+            technicalDetails: warnings.join("\n"),
+          });
+        }
+      } catch {
+        if (!cancelled) {
+          setAppError({
+            kind: "unknown",
+            title: "旧リカバリ移行を完了できませんでした",
+            summary: "旧一時ディレクトリからapp dataへの移行中にエラーが発生しました。",
+            currentContentState: "現在開いている文書は変更していません。",
+            dataLossRisk: "旧リカバリファイルは削除していません。",
+            nextActions: ["アプリを再起動して再試行する", "保存済みプロジェクトを開く"],
+            technicalDetails: null,
+          });
+        }
+      }
+    }
+    void migrateLegacyRecovery();
     return () => {
       cancelled = true;
     };
@@ -298,6 +565,71 @@ export default function App() {
 
   const updatePreferences = useCallback((update: UserPreferencesUpdate) => {
     setUserPreferences((current) => updateUserPreferences(current, update));
+  }, []);
+
+  const resetPreferenceCategory = useCallback(
+    (category: "appearance" | "layout" | "toolbar" | "editing") => {
+      if (!confirm(`${category} 設定だけを初期化します。現在の文書内容は変更しません。`)) return;
+      setUserPreferences((current) => resetUserPreferenceCategory(current, category));
+    },
+    [],
+  );
+
+  const resetAllPreferences = useCallback(() => {
+    if (!confirm("すべてのユーザー設定を初期化します。現在の文書内容は変更しません。")) return;
+    setUserPreferences(resetUserPreferences());
+  }, []);
+
+  const resetOnboarding = useCallback(() => {
+    if (!confirm("初回案内の表示済み状態だけを初期化します。")) return;
+    const next = {
+      ...onboardingState,
+      firstRunGuideDismissed: false,
+      updatedAt: new Date().toISOString(),
+    };
+    setOnboardingState(next);
+    setShowFirstRunGuide(true);
+  }, [onboardingState]);
+
+  const deleteAllValidRecovery = useCallback(async () => {
+    const targets = recoveryCandidates.filter((candidate) => candidate.valid);
+    if (
+      !confirm(
+        `正常なリカバリ ${targets.length}件を削除します。保存済みプロジェクトは削除しません。`,
+      )
+    )
+      return;
+    for (const candidate of targets)
+      await deleteRecoveryFile(candidate.fileName).catch(() => undefined);
+    setRecoveryCandidates((current) => current.filter((candidate) => !candidate.valid));
+  }, [recoveryCandidates]);
+
+  const deleteInvalidRecovery = useCallback(async () => {
+    const targets = recoveryCandidates.filter((candidate) => !candidate.valid);
+    if (!confirm(`壊れたリカバリ ${targets.length}件だけを削除します。`)) return;
+    for (const candidate of targets)
+      await deleteRecoveryFile(candidate.fileName).catch(() => undefined);
+    setRecoveryCandidates((current) => current.filter((candidate) => candidate.valid));
+  }, [recoveryCandidates]);
+
+  const cleanupTemporaryData = useCallback(async () => {
+    try {
+      const result = await cleanupTemporaryFiles();
+      alert(
+        `一時ファイル整理: ${result.deleted_count}件 / ${result.deleted_bytes.toLocaleString("ja-JP")} bytes 削除、失敗 ${result.failed_count}件`,
+      );
+    } catch (error) {
+      setAppError(classifyAppError(error, "一時ファイル整理"));
+    }
+  }, []);
+
+  const cleanupStaleLocks = useCallback(async () => {
+    try {
+      const result = await cleanupStaleEditLocks();
+      alert(`staleロック整理: ${result.deleted_count}件削除、失敗 ${result.failed_count}件`);
+    } catch (error) {
+      setAppError(classifyAppError(error, "編集ロック整理"));
+    }
   }, []);
 
   const setEditingPreferences = useCallback(
@@ -326,6 +658,32 @@ export default function App() {
     );
     return next;
   }, []);
+
+  const loadDocxExportModules = useCallback(async () => {
+    try {
+      setDocxModuleStatus("loading");
+      const [writer, exporter] = await Promise.all([
+        import("./features/export-docx/docxWriter"),
+        import("./features/export-docx/exportDocument"),
+      ]);
+      setDocxModuleStatus("idle");
+      return { writer, exporter };
+    } catch (error) {
+      setDocxModuleStatus("error");
+      setAppError(classifyAppError(error, "DOCX書き出し準備"));
+      throw error;
+    }
+  }, []);
+
+  const askExternalConflictChoice = useCallback(
+    (request: ExternalConflictRequest): Promise<ExternalConflictChoice> => {
+      return new Promise((resolve) => {
+        setExternalConflict(request);
+        setResolveExternalConflict(() => resolve);
+      });
+    },
+    [],
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -548,15 +906,131 @@ export default function App() {
     setRecentProjects((current) => addRecentProject(current, { path, displayName }));
   }, []);
 
+  const releaseActiveEditLock = useCallback(async () => {
+    const lock = activeEditLockRef.current;
+    const path = latestProjectPathRef.current;
+    if (!lock || !path) return;
+    await releaseProjectEditLock(path, lock.lock_id).catch(() => undefined);
+    setActiveEditLock(null);
+  }, []);
+
+  const askEditLockChoice = useCallback(
+    (path: string, status: ProjectEditLockStatus): Promise<EditLockChoice> =>
+      new Promise((resolve) => {
+        setEditLockDialog({ path, status, resolve });
+      }),
+    [],
+  );
+
+  const acquireEditLockForPath = useCallback(
+    async (path: string): Promise<EditLockOpenDecision> => {
+      try {
+        const status = await checkProjectEditLock(path);
+        if (shouldWarnAboutEditLock(status)) {
+          const choice = await askEditLockChoice(path, status);
+          if (choice === "read-only") {
+            setReadOnlyReason(status.reason);
+            setActiveEditLock(null);
+            return "read-only";
+          }
+          if (choice === "copy") {
+            setReadOnlyReason(null);
+            setActiveEditLock(null);
+            return "copy";
+          }
+          if (choice === "cancel") return "cancel";
+        }
+        const lock = await createProjectEditLock({
+          projectPath: path,
+          sessionId: sessionProjectKeyRef.current,
+          appVersion: APP_VERSION,
+          keepDisplayPath: true,
+        });
+        setReadOnlyReason(null);
+        setActiveEditLock(lock);
+        return "editable";
+      } catch {
+        setReadOnlyReason(null);
+        setActiveEditLock(null);
+        return "editable";
+      }
+    },
+    [askEditLockChoice],
+  );
+
   const saveProject = useCallback(async (): Promise<boolean> => {
     return enqueueSave(async () => {
+      if (readOnlyReason) {
+        setSaveStatus("dirty");
+        setAppError({
+          kind: "permission_denied",
+          title: "読み取り専用です",
+          summary: "このプロジェクトは読み取り専用で開いているため、通常保存できません。",
+          currentContentState: "現在の文書内容は画面上に残っています。",
+          dataLossRisk: "元ファイルは変更していません。",
+          nextActions: ["名前を付けて保存で複製を作成してください。"],
+          technicalDetails: readOnlyReason,
+        });
+        return false;
+      }
       setSaveStatus("saving");
       const projectToSave = projectForSave(latestProjectRef.current, editingPreferencesRef.current);
+      const serializedSize = estimateSerializedSizeBytes(JSON.stringify(projectToSave));
+      setSavingSizeBytes(serializedSize);
       const saveHash = projectContentHash(projectToSave);
       try {
         const currentPath = latestProjectPathRef.current;
         if (currentPath) {
-          await saveProjectToPath(currentPath, projectToSave);
+          const currentSnapshot = await getFileSnapshot(currentPath).catch(() => null);
+          const conflictRequest = createExternalConflictRequest({
+            path: currentPath,
+            previous: lastFileSnapshotRef.current,
+            current: currentSnapshot,
+          });
+          if (conflictRequest) {
+            const choice = await askExternalConflictChoice(conflictRequest);
+            if (choice === "cancel") {
+              setSaveStatus("dirty");
+              return false;
+            }
+            if (choice === "reload") {
+              const loaded = await openProjectFromPath(currentPath);
+              setProject(loaded.project);
+              setProjectPath(loaded.path);
+              latestProjectPathRef.current = loaded.path;
+              setLastExplicitSaveAt(new Date().toISOString());
+              setLastAutosaveAt(null);
+              setLastFileSnapshot(await getFileSnapshot(loaded.path).catch(() => null));
+              editor?.commands.setContent(
+                hydrateImageSources(loaded.project.editorContent, loaded.project.assets) as Content,
+              );
+              setDocumentOpen(true);
+              setSaveStatus("saved");
+              rememberRecentProject(loaded.path, loaded.project.metadata.title);
+              return false;
+            }
+            if (choice === "save-as") {
+              const path = await saveProjectWithDialog(projectToSave);
+              if (!path) {
+                setSaveStatus("dirty");
+                return false;
+              }
+              setProjectPath(path);
+              latestProjectPathRef.current = path;
+              rememberRecentProject(path, projectToSave.metadata.title);
+            } else if (choice === "overwrite") {
+              const confirmed = confirm(
+                "外部で変更されたファイルを上書きします。保存前バックアップを作成してから続行しますか？",
+              );
+              if (!confirmed) {
+                setSaveStatus("dirty");
+                return false;
+              }
+              await saveProjectToPath(currentPath, projectToSave);
+            }
+          } else {
+            await saveProjectToPath(currentPath, projectToSave);
+          }
         } else {
           const path = await saveProjectWithDialog(projectToSave);
           if (!path) {
@@ -575,26 +1049,56 @@ export default function App() {
         setSaveStatus(latestHash === saveHash ? "saved" : "dirty");
         if (latestProjectPathRef.current) {
           rememberRecentProject(latestProjectPathRef.current, projectToSave.metadata.title);
+          const snapshot = await getFileSnapshot(latestProjectPathRef.current).catch(() => null);
+          setLastFileSnapshot(snapshot);
+          await refreshBackupFiles();
+        }
+        if (
+          latestProjectPathRef.current &&
+          shouldSuggestNewordExtension(latestProjectPathRef.current)
+        ) {
+          setAppError({
+            kind: "unknown",
+            title: ".neword形式への保存を推奨します",
+            summary:
+              "従来のJSONプロジェクトとして保存しました。次回の名前を付けて保存では .neword を選ぶことを推奨します。",
+            currentContentState: "現在の保存は完了しています。",
+            dataLossRisk: "既存のJSONプロジェクト互換性は維持されています。",
+            nextActions: ["名前を付けて保存で .neword を選ぶ", "このまま .json として使い続ける"],
+            technicalDetails: null,
+          });
         }
         return true;
       } catch (error) {
         setSaveStatus("error");
         setAppError(classifyAppError(error, "プロジェクト保存"));
         return false;
+      } finally {
+        setSavingSizeBytes(null);
       }
     });
-  }, [enqueueSave, rememberRecentProject]);
+  }, [
+    askExternalConflictChoice,
+    editor,
+    enqueueSave,
+    readOnlyReason,
+    refreshBackupFiles,
+    rememberRecentProject,
+  ]);
 
   const saveProjectAs = useCallback(async (): Promise<boolean> => {
     return enqueueSave(async () => {
       setSaveStatus("saving");
       const projectToSave = projectForSave(latestProjectRef.current, editingPreferencesRef.current);
+      setSavingSizeBytes(estimateSerializedSizeBytes(JSON.stringify(projectToSave)));
       const saveHash = projectContentHash(projectToSave);
       try {
         const path = await saveProjectWithDialog(projectToSave);
         if (path) {
+          await releaseActiveEditLock();
           setProjectPath(path);
           latestProjectPathRef.current = path;
+          await acquireEditLockForPath(path);
           const savedAt = new Date().toISOString();
           setLastExplicitSaveAt(savedAt);
           const latestHash = projectContentHash(
@@ -602,6 +1106,8 @@ export default function App() {
           );
           setSaveStatus(latestHash === saveHash ? "saved" : "dirty");
           rememberRecentProject(path, projectToSave.metadata.title);
+          setLastFileSnapshot(await getFileSnapshot(path).catch(() => null));
+          await refreshBackupFiles();
           return true;
         } else {
           setSaveStatus("dirty");
@@ -611,9 +1117,17 @@ export default function App() {
         setSaveStatus("error");
         setAppError(classifyAppError(error, "プロジェクト別名保存"));
         return false;
+      } finally {
+        setSavingSizeBytes(null);
       }
     });
-  }, [enqueueSave, rememberRecentProject]);
+  }, [
+    acquireEditLockForPath,
+    enqueueSave,
+    refreshBackupFiles,
+    releaseActiveEditLock,
+    rememberRecentProject,
+  ]);
 
   const askUnsavedChoice = useCallback((actionLabel: string): Promise<UnsavedChoice> => {
     return new Promise((resolve) => {
@@ -634,38 +1148,51 @@ export default function App() {
     [askUnsavedChoice, documentOpen, saveProject, saveStatus],
   );
 
-  const createAndOpenNewProject = useCallback(() => {
+  const createAndOpenNewProject = useCallback(async () => {
+    await releaseActiveEditLock();
     const { project: next } = createBlankDocumentProject({ editingPreferences });
     setProject(next);
     setProjectPath(null);
     latestProjectPathRef.current = null;
+    setLastFileSnapshot(null);
+    setReadOnlyReason(null);
+    setActiveEditLock(null);
     sessionProjectKeyRef.current = `session-${crypto.randomUUID()}`;
     setLastExplicitSaveAt(null);
     setLastAutosaveAt(null);
     editor?.commands.setContent(hydrateImageSources(next.editorContent, next.assets) as Content);
     setDocumentOpen(true);
     setSaveStatus("dirty");
-  }, [editingPreferences, editor]);
+  }, [editingPreferences, editor, releaseActiveEditLock]);
 
   const newProject = useCallback(async () => {
     await runAfterUnsavedCheck("新規文書を作成", createAndOpenNewProject);
   }, [createAndOpenNewProject, runAfterUnsavedCheck]);
 
   const openLoadedProject = useCallback(
-    (loaded: { path: string; project: DocumentProject }) => {
+    async (loaded: { path: string; project: DocumentProject }) => {
+      const candidate = await inspectOpenPath(loaded.path);
+      if (!candidate.safe_to_read || candidate.kind !== "project") {
+        throw new Error("プロジェクトファイルとして安全に開けません。");
+      }
+      await releaseActiveEditLock();
+      const lockDecision = await acquireEditLockForPath(loaded.path);
+      if (lockDecision === "cancel") return;
+      const openAsCopy = lockDecision === "copy";
       setProject(loaded.project);
-      setProjectPath(loaded.path);
-      latestProjectPathRef.current = loaded.path;
-      setLastExplicitSaveAt(new Date().toISOString());
+      setProjectPath(openAsCopy ? null : loaded.path);
+      latestProjectPathRef.current = openAsCopy ? null : loaded.path;
+      setLastExplicitSaveAt(openAsCopy ? null : new Date().toISOString());
       setLastAutosaveAt(null);
+      setLastFileSnapshot(openAsCopy ? null : await getFileSnapshot(loaded.path).catch(() => null));
       editor?.commands.setContent(
         hydrateImageSources(loaded.project.editorContent, loaded.project.assets) as Content,
       );
       setDocumentOpen(true);
-      setSaveStatus("saved");
-      rememberRecentProject(loaded.path, loaded.project.metadata.title);
+      setSaveStatus(openAsCopy ? "dirty" : "saved");
+      if (!openAsCopy) rememberRecentProject(loaded.path, loaded.project.metadata.title);
     },
-    [editor, rememberRecentProject],
+    [acquireEditLockForPath, editor, releaseActiveEditLock, rememberRecentProject],
   );
 
   const openProject = useCallback(async () => {
@@ -673,7 +1200,7 @@ export default function App() {
       try {
         const loaded = await openProjectWithDialog();
         if (!loaded) return;
-        openLoadedProject(loaded);
+        await openLoadedProject(loaded);
       } catch (error) {
         setAppError(classifyAppError(error, "プロジェクト読み込み"));
       }
@@ -684,7 +1211,7 @@ export default function App() {
     async (entry: RecentProjectEntry) => {
       await runAfterUnsavedCheck("最近使ったプロジェクトを開く", async () => {
         try {
-          openLoadedProject(await openProjectFromPath(entry.path));
+          await openLoadedProject(await openProjectFromPath(entry.path));
         } catch (error) {
           setAppError(classifyAppError(error, "最近使ったプロジェクトの読み込み"));
         }
@@ -692,6 +1219,151 @@ export default function App() {
     },
     [openLoadedProject, runAfterUnsavedCheck],
   );
+
+  async function convertOpenedDocxWithWorker(opened: OpenDocxResult, requestId: string) {
+    const { convertOpenedDocxWithWorker: convertWithWorker } =
+      await import("./features/import-docx/importWorkerPipeline");
+    return convertWithWorker({
+      opened,
+      requestId,
+      isActive: (activeRequestId) => docxImportCancelTokenRef.current === activeRequestId,
+      onWorkerStage: (stage) => {
+        if (stage === "mammoth-convert") setDocxImportStage("mammoth");
+      },
+      onCancelReady: (cancel) => {
+        activeImportWorkerCancelRef.current = cancel;
+      },
+    });
+  }
+
+  const openPathWithUnsavedCheck = useCallback(
+    async (path: string) => {
+      await runAfterUnsavedCheck("ファイルを開く", async () => {
+        const kind = classifyDroppedOrOpenedPath(path);
+        try {
+          const candidate = await inspectOpenPath(path);
+          if (!candidate.safe_to_read) {
+            throw new Error("指定ファイルを安全に開けません。");
+          }
+          if (kind === "project") {
+            await openLoadedProject(await openProjectFromPath(path));
+            return;
+          }
+          if (kind === "docx") {
+            const requestId = crypto.randomUUID();
+            setDocxImportCancelToken(requestId);
+            docxImportCancelTokenRef.current = requestId;
+            setDocxImportStartedAt(Date.now());
+            setDocxImportStage("zip-inspection");
+            const opened = await openDocxFromPathCancellable(path, requestId);
+            if (docxImportCancelTokenRef.current !== requestId) return;
+            setDocxImportStage("mammoth");
+            const converted = await convertOpenedDocxWithWorker(opened, requestId);
+            if (docxImportCancelTokenRef.current !== requestId || !converted) return;
+            setDocxImportStage("preview");
+            setPreview(converted);
+            docxImportCancelTokenRef.current = null;
+            activeImportWorkerCancelRef.current = null;
+            setDocxImportCancelToken(null);
+            setDocxImportStartedAt(null);
+            setDocxImportStage("idle");
+            return;
+          }
+          setAppError({
+            kind: "unsupported_file_type",
+            title: "対応していないファイルです",
+            summary: ".neword、従来の .json プロジェクト、または .docx を指定してください。",
+            currentContentState: "現在の文書は変更していません。",
+            dataLossRisk: "ファイル内容は読み込んでいません。",
+            nextActions: ["対応形式のファイルを選び直す"],
+            technicalDetails: null,
+          });
+        } catch (error) {
+          docxImportCancelTokenRef.current = null;
+          activeImportWorkerCancelRef.current = null;
+          setDocxImportCancelToken(null);
+          setDocxImportStartedAt(null);
+          setDocxImportStage("idle");
+          setAppError(classifyAppError(error, "ファイル読み込み"));
+        }
+      });
+    },
+    [convertOpenedDocxWithWorker, openLoadedProject, runAfterUnsavedCheck],
+  );
+
+  const handleOpenPathArguments = useCallback(
+    async (paths: string[]) => {
+      const candidates = paths.filter((path) => path.trim().length > 0);
+      if (candidates.length === 0) return;
+      if (candidates.length > 1) {
+        setAppError({
+          kind: "unsupported_file_type",
+          title: "複数ファイル指定には未対応です",
+          summary: "安全のため、最初の対応ファイルだけを開きます。",
+          currentContentState: "現在の文書は未保存変更保護の対象です。",
+          dataLossRisk: "残りのファイルは読み込んでいません。",
+          nextActions: ["必要なファイルを1つずつ開いてください。"],
+          technicalDetails: null,
+        });
+      }
+      await openPathWithUnsavedCheck(candidates[0] ?? "");
+    },
+    [openPathWithUnsavedCheck],
+  );
+
+  const restoreBackupAsUnsaved = useCallback(
+    async (backup: BackupFileInfo) => {
+      await runAfterUnsavedCheck("バックアップを開く", async () => {
+        try {
+          const projectFromBackup = deserializeProject(await readBackupFile(backup.id));
+          setProject(projectFromBackup);
+          setProjectPath(null);
+          latestProjectPathRef.current = null;
+          setLastFileSnapshot(null);
+          editor?.commands.setContent(
+            hydrateImageSources(
+              projectFromBackup.editorContent,
+              projectFromBackup.assets,
+            ) as Content,
+          );
+          setDocumentOpen(true);
+          setSaveStatus("recovered");
+        } catch (error) {
+          setAppError(classifyAppError(error, "バックアップ復元"));
+        }
+      });
+    },
+    [editor, runAfterUnsavedCheck],
+  );
+
+  const deleteBackup = useCallback(
+    async (backup: BackupFileInfo) => {
+      if (!confirm("このバックアップを削除しますか？通常のプロジェクトファイルは削除しません。")) {
+        return;
+      }
+      try {
+        await deleteBackupFile(backup.id);
+        await refreshBackupFiles();
+      } catch (error) {
+        setAppError(classifyAppError(error, "バックアップ削除"));
+      }
+    },
+    [refreshBackupFiles],
+  );
+
+  const deleteEveryBackup = useCallback(async () => {
+    if (
+      !confirm("すべてのバックアップを削除しますか？通常のプロジェクトファイルは削除しません。")
+    ) {
+      return;
+    }
+    try {
+      await deleteAllBackups();
+      await refreshBackupFiles();
+    } catch (error) {
+      setAppError(classifyAppError(error, "バックアップ全削除"));
+    }
+  }, [refreshBackupFiles]);
 
   const returnHome = useCallback(async () => {
     await runAfterUnsavedCheck("ホーム画面へ戻る", () => {
@@ -706,6 +1378,7 @@ export default function App() {
       setProject(candidate.project);
       setProjectPath(null);
       latestProjectPathRef.current = null;
+      setLastFileSnapshot(null);
       editor?.commands.setContent(
         hydrateImageSources(candidate.project.editorContent, candidate.project.assets) as Content,
       );
@@ -760,12 +1433,13 @@ export default function App() {
   }, [editor, preview]);
 
   const exportDocx = useCallback(async () => {
-    const exportDocument = projectToExportDocument(project);
     const warnings = project.warnings.filter((warning) => warning.severity !== "info");
     if (warnings.length > 0 && !confirm(`${warnings.length}件の警告があります。続行しますか？`))
       return;
     try {
-      const base64 = await exportDocumentToDocxBase64(exportDocument);
+      const { writer, exporter } = await loadDocxExportModules();
+      const exportDocument = exporter.projectToExportDocument(project);
+      const base64 = await writer.exportDocumentToDocxBase64(exportDocument);
       const path = await writeBinaryFileWithDialog(
         `${project.metadata.title || "document"}.docx`,
         base64,
@@ -776,9 +1450,10 @@ export default function App() {
     } catch (error) {
       setAppError(classifyAppError(error, "DOCX書き出し"));
     }
-  }, [project]);
+  }, [loadDocxExportModules, project]);
 
   useEffect(() => {
+    if (readOnlyReason) return;
     if (saveStatus !== "dirty" && saveStatus !== "autosave-pending") return;
     setSaveStatus("autosave-pending");
     const timeout = window.setTimeout(() => {
@@ -816,50 +1491,111 @@ export default function App() {
       });
     }, AUTOSAVE_DEBOUNCE_MS);
     return () => window.clearTimeout(timeout);
-  }, [enqueueSave, lastExplicitSaveAt, saveStatus]);
+  }, [enqueueSave, lastExplicitSaveAt, readOnlyReason, saveStatus]);
 
   const requestAppClose = useCallback(async () => {
     const canClose = await runAfterUnsavedCheck("アプリを終了", () => undefined);
     if (!canClose) return;
     closeInProgressRef.current = true;
+    await releaseActiveEditLock();
     if (isTauriRuntime()) {
       await getCurrentWindow().destroy();
     }
-  }, [runAfterUnsavedCheck]);
+  }, [releaseActiveEditLock, runAfterUnsavedCheck]);
+
+  const executeAppCommand = useCallback(
+    async (command: AppCommand) => {
+      if (unsavedDialog || externalConflict) return;
+      if (command === "file.new") await newProject();
+      else if (command === "file.open") await openProject();
+      else if (command === "file.save") await saveProject();
+      else if (command === "file.save_as") await saveProjectAs();
+      else if (command === "file.import_docx") await openDocxImport();
+      else if (command === "file.export_docx") await exportDocx();
+      else if (command === "file.home") await returnHome();
+      else if (command === "file.close_window" || command === "file.quit") await requestAppClose();
+      else if (command === "edit.undo") editor?.commands.undo();
+      else if (command === "edit.redo") editor?.commands.redo();
+      else if (command === "edit.find") setSearchOpen(true);
+      else if (command === "view.toggle_sidebar")
+        updatePreferences({ layout: { sidebarVisible: !userPreferences.layout.sidebarVisible } });
+      else if (command === "view.toggle_toolbar")
+        updatePreferences({ layout: { toolbarVisible: !userPreferences.layout.toolbarVisible } });
+      else if (command === "view.toggle_settings")
+        updatePreferences({ layout: { settingsVisible: !userPreferences.layout.settingsVisible } });
+      else if (command === "view.theme_light")
+        updatePreferences({ appearance: { colorMode: "light" } });
+      else if (command === "view.theme_dark")
+        updatePreferences({ appearance: { colorMode: "dark" } });
+      else if (command === "view.theme_system")
+        updatePreferences({ appearance: { colorMode: "system" } });
+      else if (command === "document.insert_page_break")
+        editor?.chain().focus().setPageBreak().run();
+      else if (command === "document.page_settings" || command === "document.header_footer")
+        openSettingsPanel();
+      else if (command === "help.first_run") setShowFirstRunGuide(true);
+      else if (command === "help.recovery" || command === "help.backups") setDocumentOpen(false);
+      else if (command === "help.data_locations" || command === "help.about") setShowAbout(true);
+    },
+    [
+      editor,
+      externalConflict,
+      exportDocx,
+      newProject,
+      openProject,
+      openSettingsPanel,
+      requestAppClose,
+      returnHome,
+      saveProject,
+      saveProjectAs,
+      unsavedDialog,
+      updatePreferences,
+      userPreferences.layout.settingsVisible,
+      userPreferences.layout.sidebarVisible,
+      userPreferences.layout.toolbarVisible,
+    ],
+  );
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      const ctrl = event.ctrlKey || event.metaKey;
-      if (!ctrl) return;
-      if (event.key === "n") {
+      if (event.key === "Escape" && searchOpen) {
         event.preventDefault();
-        void newProject();
-      } else if (event.key === "o") {
-        event.preventDefault();
-        void openProject();
-      } else if (event.key === "s" && event.shiftKey) {
-        event.preventDefault();
-        void saveProjectAs();
-      } else if (event.key === "s") {
-        event.preventDefault();
-        void saveProject();
-      } else if (event.key === "f") {
-        event.preventDefault();
-        document.getElementById("search-input")?.focus();
-      } else if (event.key === "h") {
-        event.preventDefault();
-        document.getElementById("replace-input")?.focus();
-      } else if (event.key === ",") {
-        event.preventDefault();
-        openSettingsPanel();
-      } else if (event.key === "q") {
-        event.preventDefault();
-        void requestAppClose();
+        setSearchOpen(false);
+        if (editor) updateSearchHighlight(editor, [], -1);
+        return;
       }
+      const command = commandFromKeyboardEvent(event);
+      if (!command) return;
+      event.preventDefault();
+      void executeAppCommand(command);
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [newProject, openProject, openSettingsPanel, requestAppClose, saveProject, saveProjectAs]);
+  }, [editor, executeAppCommand, searchOpen]);
+
+  useEffect(() => {
+    if (!isTauriRuntime()) return undefined;
+    const unlistenMenu = listen<string>("neword://menu-command", (event) => {
+      if (isAppCommand(event.payload)) void executeAppCommand(event.payload);
+    });
+    const unlistenOpenPaths = listen<{ paths: string[]; source: string }>(
+      "neword://open-paths",
+      (event) => {
+        void handleOpenPathArguments(event.payload.paths);
+      },
+    );
+    return () => {
+      void unlistenMenu.then((unlisten) => unlisten());
+      void unlistenOpenPaths.then((unlisten) => unlisten());
+    };
+  }, [executeAppCommand]);
+
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+    void startupOpenPaths()
+      .then((paths) => handleOpenPathArguments(paths))
+      .catch(() => undefined);
+  }, [handleOpenPathArguments]);
 
   useEffect(() => {
     if (!isTauriRuntime()) return undefined;
@@ -874,34 +1610,154 @@ export default function App() {
     };
   }, [requestAppClose]);
 
-  function replaceFirst() {
-    if (!editor || !searchTerm) return;
-    const html = editor.getHTML();
-    const replaced = html.replace(searchTerm, replaceTerm);
-    if (html !== replaced) editor.commands.setContent(replaced);
+  useEffect(() => {
+    const interval = window.setInterval(() => {
+      const lock = activeEditLockRef.current;
+      const path = latestProjectPathRef.current;
+      if (!lock || !path) return;
+      void refreshProjectEditLock({ projectPath: path, lockId: lock.lock_id }).catch(
+        () => undefined,
+      );
+    }, 60_000);
+    return () => window.clearInterval(interval);
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      void releaseActiveEditLock();
+    };
+  }, [releaseActiveEditLock]);
+
+  useEffect(() => {
+    const onDragOver = (event: DragEvent) => {
+      if (!event.dataTransfer) return;
+      event.preventDefault();
+      setDropActive(true);
+    };
+    const onDragLeave = (event: DragEvent) => {
+      if (event.target === document.body || event.target === document.documentElement) {
+        setDropActive(false);
+      }
+    };
+    const onDrop = (event: DragEvent) => {
+      event.preventDefault();
+      setDropActive(false);
+      const files = Array.from(event.dataTransfer?.files ?? []);
+      if (files.length !== 1) {
+        setAppError({
+          kind: "unsupported_file_type",
+          title: "複数ファイルのドロップには未対応です",
+          summary: "安全のため、1回に1つの .neword、.json、.docx だけを開きます。",
+          currentContentState: "現在の文書は変更していません。",
+          dataLossRisk: "ドロップされたファイルは読み込んでいません。",
+          nextActions: ["1ファイルだけをドロップする", "ファイルメニューから開く"],
+          technicalDetails: null,
+        });
+        return;
+      }
+      const file = files[0];
+      const path = (file as File & { path?: string }).path;
+      if (!path) {
+        setAppError({
+          kind: "unsupported_file_type",
+          title: "ファイルパスを取得できません",
+          summary: "URLやブラウザ由来のデータはプロジェクトファイルとして扱いません。",
+          currentContentState: "現在の文書は変更していません。",
+          dataLossRisk: "ドロップされた内容は読み込んでいません。",
+          nextActions: ["ファイルダイアログから開く"],
+          technicalDetails: null,
+        });
+        return;
+      }
+      void openPathWithUnsavedCheck(path);
+    };
+    window.addEventListener("dragover", onDragOver);
+    window.addEventListener("dragleave", onDragLeave);
+    window.addEventListener("drop", onDrop);
+    return () => {
+      window.removeEventListener("dragover", onDragOver);
+      window.removeEventListener("dragleave", onDragLeave);
+      window.removeEventListener("drop", onDrop);
+    };
+  }, [openPathWithUnsavedCheck]);
+
+  function moveSearch(delta: 1 | -1) {
+    if (!editor || searchMatches.length === 0) return;
+    const next = (currentSearchIndex + delta + searchMatches.length) % searchMatches.length;
+    setCurrentSearchIndex(next);
+    const match = searchMatches[next];
+    if (match) {
+      editor.commands.setTextSelection({ from: match.from, to: match.to });
+      editor.commands.focus();
+      editor.view.dom
+        .querySelector(".search-match-current")
+        ?.scrollIntoView({ block: "center", inline: "nearest" });
+    }
+  }
+
+  function replaceCurrent() {
+    if (!editor || readOnlyReason || currentSearchIndex < 0) return;
+    const match = searchMatches[currentSearchIndex];
+    if (!match) return;
+    const count = replaceMatches(editor, [match], replaceTerm, searchOptions, 1);
+    setLastReplaceCount(count);
+    setSaveStatus(count > 0 ? "dirty" : saveStatus);
+  }
+
+  function replaceAll() {
+    if (!editor || readOnlyReason) return;
+    const count = replaceMatches(editor, searchMatches, replaceTerm, searchOptions);
+    setLastReplaceCount(count);
+    setSaveStatus(count > 0 ? "dirty" : saveStatus);
   }
 
   async function openDocxImport() {
     await runAfterUnsavedCheck("DOCXを読み込む", async () => {
+      const token = crypto.randomUUID();
+      setDocxImportCancelToken(token);
+      docxImportCancelTokenRef.current = token;
+      setDocxImportStartedAt(Date.now());
       try {
-        const opened = await openDocxWithDialog();
-        if (!opened) return;
-        const converted = await convertDocxBase64ToImportResult(
-          opened.base64,
-          {
-            name: opened.name,
-            sizeBytes: opened.inspection.entries.reduce(
-              (sum, entry) => sum + entry.compressed_size,
-              0,
-            ),
-            path: opened.path,
-            inspectedAt: new Date().toISOString(),
-          },
-          opened.inspection,
-        );
+        setDocxImportStage("file-check");
+        const path = await selectDocxPath();
+        if (!path) {
+          setDocxImportStage("idle");
+          setDocxImportCancelToken(null);
+          return;
+        }
+        if (docxImportCancelTokenRef.current !== token) return;
+        setDocxImportStage("zip-inspection");
+        const opened = await openDocxFromPathCancellable(path, token);
+        if (docxImportCancelTokenRef.current !== token) return;
+        setDocxImportStage("ooxml-extraction");
+        await Promise.resolve();
+        setDocxImportStage("asset-extraction");
+        await Promise.resolve();
+        setDocxImportStage("mammoth");
+        const converted = await convertOpenedDocxWithWorker(opened, token);
+        if (docxImportCancelTokenRef.current !== token) return;
+        if (!converted) return;
+        setDocxImportStage("sanitize");
+        await Promise.resolve();
+        setDocxImportStage("classification");
+        await Promise.resolve();
+        setDocxImportStage("model");
+        await Promise.resolve();
+        if (docxImportCancelTokenRef.current !== token) return;
+        setDocxImportStage("preview");
         setPreview(converted);
       } catch (error) {
-        setAppError(classifyAppError(error, "DOCX読み込み"));
+        if (docxImportCancelTokenRef.current === token) {
+          setAppError(classifyAppError(error, "DOCX読み込み"));
+        }
+      } finally {
+        if (docxImportCancelTokenRef.current === token) {
+          docxImportCancelTokenRef.current = null;
+          activeImportWorkerCancelRef.current = null;
+          setDocxImportCancelToken(null);
+          setDocxImportStartedAt(null);
+          setDocxImportStage("idle");
+        }
       }
     });
   }
@@ -995,6 +1851,28 @@ export default function App() {
     }) ?? [];
   const hasImportErrors =
     preview?.warnings.some((warning) => warning.severity === "error") ?? false;
+  const warningCategories = useMemo(
+    () => [...new Set((preview?.warnings ?? []).map((warning) => warning.category ?? "general"))],
+    [preview],
+  );
+  const filteredPreviewWarnings = useMemo(
+    () =>
+      (preview?.warnings ?? []).filter(
+        (warning) =>
+          (warningSeverityFilter === "all" || warning.severity === warningSeverityFilter) &&
+          (warningCategoryFilter === "all" ||
+            (warning.category ?? "general") === warningCategoryFilter),
+      ),
+    [preview, warningCategoryFilter, warningSeverityFilter],
+  );
+  const warningSeverityCounts = useMemo(
+    () => ({
+      info: (preview?.warnings ?? []).filter((warning) => warning.severity === "info").length,
+      warning: (preview?.warnings ?? []).filter((warning) => warning.severity === "warning").length,
+      error: (preview?.warnings ?? []).filter((warning) => warning.severity === "error").length,
+    }),
+    [preview],
+  );
   const toolbarPosition = userPreferences.layout.toolbarPosition === "bottom" ? "bottom" : "top";
   const toolbar = userPreferences.layout.toolbarVisible ? (
     <EditorToolbar
@@ -1012,7 +1890,16 @@ export default function App() {
         <AppSidebar
           key="sidebar"
           items={outline}
+          activeItemId={activeOutlineItemId}
           className={`sidebar-position-${userPreferences.layout.sidebarPosition}`}
+          onSelectItem={(item) => {
+            if (!editor || item.position === undefined) return;
+            editor.commands.setTextSelection(item.position + 1);
+            editor.commands.focus();
+            editor.view.dom
+              .querySelector(".ProseMirror-focused")
+              ?.scrollIntoView({ block: "center", inline: "nearest" });
+          }}
         />
       );
     }
@@ -1029,6 +1916,10 @@ export default function App() {
           footer={project.footer}
           userPreferences={userPreferences}
           preferenceSaveError={preferenceSaveError}
+          appDataPaths={appDataPaths}
+          recoveryCount={recoveryCandidates.length}
+          backupCount={backupFiles.length}
+          recentProjectCount={recentProjects.entries.length}
           showAdvancedEditingSettings={showAdvancedEditingSettings}
           canApplyToSelectedBlock={selectedParagraphEditable}
           canEditSelectedTableCell={selectedTableCellEditable}
@@ -1049,6 +1940,22 @@ export default function App() {
           onDeleteSelectedImage={deleteSelectedImage}
           onUpdateHeader={updateHeader}
           onUpdateFooter={updateFooter}
+          onClearRecentProjects={() => setRecentProjects(clearRecentProjects())}
+          onResetPreferenceCategory={resetPreferenceCategory}
+          onResetAllPreferences={resetAllPreferences}
+          onResetOnboarding={resetOnboarding}
+          onDeleteAllRecovery={() => void deleteAllValidRecovery()}
+          onDeleteInvalidRecovery={() => void deleteInvalidRecovery()}
+          onCleanupTemporaryFiles={() => void cleanupTemporaryData()}
+          onCleanupStaleLocks={() => void cleanupStaleLocks()}
+          onOpenRecoveryManager={() => setDocumentOpen(false)}
+          onOpenBackupManager={() => setDocumentOpen(false)}
+          onDeleteAllBackups={() => void deleteEveryBackup()}
+          onOpenAppDataFolder={(folder) =>
+            void openAppDataFolder(folder).catch((error: unknown) =>
+              setAppError(classifyAppError(error, "フォルダーを開く")),
+            )
+          }
         />
       );
     }
@@ -1066,25 +1973,100 @@ export default function App() {
           .join(" ")}
       >
         {toolbarPosition === "top" ? toolbar : null}
-        <div className="findbar">
-          <input
-            id="search-input"
-            aria-label="検索"
-            placeholder="検索"
-            value={searchTerm}
-            onChange={(event) => setSearchTerm(event.target.value)}
-          />
-          <input
-            id="replace-input"
-            aria-label="置換"
-            placeholder="置換"
-            value={replaceTerm}
-            onChange={(event) => setReplaceTerm(event.target.value)}
-          />
-          <button type="button" onClick={replaceFirst}>
-            置換
-          </button>
-        </div>
+        {searchOpen ? (
+          <div className="findbar" role="search" aria-label="文書内検索と置換">
+            <input
+              id="search-input"
+              aria-label="検索"
+              placeholder="検索"
+              value={searchTerm}
+              onChange={(event) => setSearchTerm(event.target.value)}
+            />
+            <span>
+              {searchMatches.length > 0 ? currentSearchIndex + 1 : 0} / {searchMatches.length}
+            </span>
+            <button
+              type="button"
+              onClick={() => moveSearch(-1)}
+              disabled={searchMatches.length === 0}
+            >
+              前へ
+            </button>
+            <button
+              type="button"
+              onClick={() => moveSearch(1)}
+              disabled={searchMatches.length === 0}
+            >
+              次へ
+            </button>
+            <input
+              id="replace-input"
+              aria-label="置換"
+              placeholder="置換"
+              value={replaceTerm}
+              onChange={(event) => setReplaceTerm(event.target.value)}
+              disabled={readOnlyReason !== null}
+            />
+            <button
+              type="button"
+              onClick={replaceCurrent}
+              disabled={readOnlyReason !== null || currentSearchIndex < 0}
+            >
+              置換
+            </button>
+            <button
+              type="button"
+              onClick={replaceAll}
+              disabled={readOnlyReason !== null || searchMatches.length === 0}
+            >
+              すべて置換
+            </button>
+            <label>
+              <input
+                type="checkbox"
+                checked={searchOptions.caseSensitive}
+                onChange={(event) =>
+                  setSearchOptions((current) => ({
+                    ...current,
+                    caseSensitive: event.target.checked,
+                  }))
+                }
+              />
+              大文字小文字
+            </label>
+            <label>
+              <input
+                type="checkbox"
+                checked={searchOptions.wholeWord}
+                onChange={(event) =>
+                  setSearchOptions((current) => ({ ...current, wholeWord: event.target.checked }))
+                }
+              />
+              単語単位
+            </label>
+            <label>
+              <input
+                type="checkbox"
+                checked={searchOptions.regex}
+                onChange={(event) =>
+                  setSearchOptions((current) => ({ ...current, regex: event.target.checked }))
+                }
+              />
+              正規表現
+            </label>
+            <button
+              type="button"
+              onClick={() => {
+                setSearchOpen(false);
+                if (editor) updateSearchHighlight(editor, [], -1);
+              }}
+            >
+              閉じる
+            </button>
+            {searchError ? <span className="warning warning-warning">{searchError}</span> : null}
+            {lastReplaceCount !== null ? <span>{lastReplaceCount}件置換しました</span> : null}
+          </div>
+        ) : null}
         <div
           className="editor-page-frame"
           style={pagePreviewStyle}
@@ -1218,8 +2200,52 @@ export default function App() {
         <span>現在の保存先: {projectPath ?? "未保存の新規文書"}</span>
         <span>元DOCX: {project.metadata.sourceFileName ?? "なし。元DOCXは直接変更しません。"}</span>
         <span>最終DOCX書き出し: {project.lastExportedAt ?? "未実行"}</span>
+        <span>
+          保存サイズ:{" "}
+          {savingSizeBytes ? `${savingSizeBytes.toLocaleString("ja-JP")} bytes` : "待機中"}
+        </span>
         <span>{hasUnsavedChanges(saveStatus) ? "未保存の変更あり" : "未保存の変更なし"}</span>
+        <span>
+          統計: 空白込{documentStatistics.charactersWithSpaces.toLocaleString("ja-JP")}字 / 空白除く
+          {documentStatistics.charactersWithoutSpaces.toLocaleString("ja-JP")}字
+        </span>
+        <span>
+          英数字語{documentStatistics.asciiWordCount.toLocaleString("ja-JP")} / 日本語文字
+          {documentStatistics.japaneseCharacterCount.toLocaleString("ja-JP")}
+        </span>
+        <span>
+          段落{documentStatistics.paragraphCount} 見出し{documentStatistics.headingCount} 表
+          {documentStatistics.tableCount} 画像{documentStatistics.imageCount} 読了約
+          {documentStatistics.estimatedReadingMinutes}分
+        </span>
+        {readOnlyReason ? <span>読み取り専用: {readOnlyReason}</span> : null}
       </div>
+      {docxModuleStatus === "loading" ? (
+        <div className="save-timestamps" role="status">
+          DOCX機能を読み込み中...
+        </div>
+      ) : null}
+      {docxImportCancelToken ? (
+        <div className="save-timestamps" role="status" aria-live="polite">
+          DOCX読み込み: {DOCX_IMPORT_STAGE_LABELS[docxImportStage]}
+          {docxImportStartedAt
+            ? ` / 経過 ${Math.max(0, Math.round((Date.now() - docxImportStartedAt) / 1000))}秒`
+            : ""}
+          <button
+            type="button"
+            onClick={() => {
+              activeImportWorkerCancelRef.current?.();
+              void cancelDocxImport(docxImportCancelToken);
+              docxImportCancelTokenRef.current = null;
+              setDocxImportCancelToken(null);
+              setDocxImportStage("cancelled");
+              setDocxImportStartedAt(null);
+            }}
+          >
+            キャンセル
+          </button>
+        </div>
+      ) : null}
       {lastAutosaveAt || lastExplicitSaveAt ? (
         <div className="save-timestamps" aria-label="保存日時">
           {lastExplicitSaveAt ? <span>明示保存: {lastExplicitSaveAt}</span> : null}
@@ -1239,6 +2265,7 @@ export default function App() {
         <HomeScreen
           recentProjects={recentProjects.entries}
           recoveryCandidates={recoveryCandidates}
+          backupFiles={backupFiles}
           onNewProject={() => void newProject()}
           onImportDocx={() => void openDocxImport()}
           onOpenProject={() => void openProject()}
@@ -1250,8 +2277,17 @@ export default function App() {
           onRecoverCandidate={recoverCandidate}
           onDeleteRecoveryCandidate={(candidate) => void deleteRecoveryCandidate(candidate)}
           onDismissRecoveryCandidate={dismissRecoveryCandidate}
+          onOpenBackup={(backup) => void restoreBackupAsUnsaved(backup)}
+          onDeleteBackup={(backup) => void deleteBackup(backup)}
+          onDeleteAllBackups={() => void deleteEveryBackup()}
         />
       )}
+
+      {dropActive ? (
+        <div className="drop-overlay" role="status" aria-live="polite">
+          ファイルをドロップして開く
+        </div>
+      ) : null}
 
       {preview ? (
         <section className="modal" role="dialog" aria-modal="true" aria-label="変換確認">
@@ -1297,14 +2333,71 @@ export default function App() {
             </dl>
             {preview.warnings.length > 0 ? (
               <div className="warning-list" aria-label="ImportWarning一覧">
-                {preview.warnings.map((warning, index) => (
-                  <p
+                <p>
+                  info {warningSeverityCounts.info} / warning {warningSeverityCounts.warning} /
+                  error {warningSeverityCounts.error}
+                </p>
+                <div className="button-row">
+                  <select
+                    aria-label="警告severity"
+                    value={warningSeverityFilter}
+                    onChange={(event) =>
+                      setWarningSeverityFilter(event.target.value as typeof warningSeverityFilter)
+                    }
+                  >
+                    <option value="all">全severity</option>
+                    <option value="info">info</option>
+                    <option value="warning">warning</option>
+                    <option value="error">error</option>
+                  </select>
+                  <select
+                    aria-label="警告category"
+                    value={warningCategoryFilter}
+                    onChange={(event) => setWarningCategoryFilter(event.target.value)}
+                  >
+                    <option value="all">全category</option>
+                    {warningCategories.map((category) => (
+                      <option key={category} value={category}>
+                        {category}
+                      </option>
+                    ))}
+                  </select>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const safeText = JSON.stringify(
+                        filteredPreviewWarnings.map((warning) => ({
+                          code: warning.code,
+                          category: warning.category,
+                          severity: warning.severity,
+                          message: warning.message,
+                          affectedPart: warning.affectedPart,
+                          canContinue: warning.canContinue,
+                          recommendation: warning.recommendation,
+                        })),
+                        null,
+                        2,
+                      );
+                      void navigator.clipboard?.writeText(safeText);
+                    }}
+                  >
+                    警告をコピー
+                  </button>
+                </div>
+                {filteredPreviewWarnings.map((warning, index) => (
+                  <details
                     key={`${warning.code}-${warning.location ?? index}`}
                     className={`warning warning-${warning.severity}`}
                   >
-                    [{warning.severity}] {warning.code}: {warning.message}
-                    {warning.location ? ` (${warning.location})` : ""}
-                  </p>
+                    <summary>
+                      [{warning.severity}] [{warning.category ?? "general"}] {warning.code}:{" "}
+                      {warning.message}
+                    </summary>
+                    <p>{warning.humanReadableReason ?? warning.message}</p>
+                    <p>対象: {warning.affectedPart ?? warning.location ?? "不明"}</p>
+                    <p>継続: {warning.canContinue === false ? "不可" : "可能"}</p>
+                    <p>推奨: {warning.recommendation ?? "プレビューを確認してください。"}</p>
+                  </details>
                 ))}
               </div>
             ) : null}
@@ -1464,12 +2557,35 @@ export default function App() {
           }}
         />
       ) : null}
+      {editLockDialog ? (
+        <EditLockConflictDialog
+          path={editLockDialog.path}
+          status={editLockDialog.status}
+          currentSessionId={sessionProjectKeyRef.current}
+          onChoose={(choice) => {
+            editLockDialog.resolve(choice);
+            setEditLockDialog(null);
+          }}
+        />
+      ) : null}
+      {externalConflict && resolveExternalConflict ? (
+        <ExternalConflictDialog
+          request={externalConflict}
+          onChoose={(choice) => {
+            resolveExternalConflict(choice);
+            setResolveExternalConflict(null);
+            setExternalConflict(null);
+          }}
+        />
+      ) : null}
       {appError ? <ErrorDialog error={appError} onClose={() => setAppError(null)} /> : null}
       {showFirstRunGuide ? <FirstRunGuide onClose={dismissGuide} /> : null}
       {showAbout ? (
         <AboutDialog
           projectPath={projectPath}
           recoveryDirectory={recoveryDirectory}
+          appDataPaths={appDataPaths}
+          backupCount={backupFiles.length}
           onShowGuide={() => setShowFirstRunGuide(true)}
           onClose={() => setShowAbout(false)}
         />
@@ -1481,6 +2597,7 @@ export default function App() {
 function HomeScreen({
   recentProjects,
   recoveryCandidates,
+  backupFiles,
   onNewProject,
   onImportDocx,
   onOpenProject,
@@ -1490,9 +2607,13 @@ function HomeScreen({
   onRecoverCandidate,
   onDeleteRecoveryCandidate,
   onDismissRecoveryCandidate,
+  onOpenBackup,
+  onDeleteBackup,
+  onDeleteAllBackups,
 }: {
   recentProjects: RecentProjectEntry[];
   recoveryCandidates: RecoveryCandidate[];
+  backupFiles: BackupFileInfo[];
   onNewProject: () => void;
   onImportDocx: () => void;
   onOpenProject: () => void;
@@ -1502,6 +2623,9 @@ function HomeScreen({
   onRecoverCandidate: (candidate: RecoveryCandidate) => void;
   onDeleteRecoveryCandidate: (candidate: RecoveryCandidate) => void;
   onDismissRecoveryCandidate: (candidate: RecoveryCandidate) => void;
+  onOpenBackup: (backup: BackupFileInfo) => void;
+  onDeleteBackup: (backup: BackupFileInfo) => void;
+  onDeleteAllBackups: () => void;
 }) {
   return (
     <section className="home-screen" aria-label="ホーム">
@@ -1560,6 +2684,91 @@ function HomeScreen({
         onDeleteRecoveryCandidate={onDeleteRecoveryCandidate}
         onDismissRecoveryCandidate={onDismissRecoveryCandidate}
       />
+      <BackupList
+        backups={backupFiles}
+        onOpenBackup={onOpenBackup}
+        onDeleteBackup={onDeleteBackup}
+        onDeleteAllBackups={onDeleteAllBackups}
+      />
+    </section>
+  );
+}
+
+function BackupList({
+  backups,
+  onOpenBackup,
+  onDeleteBackup,
+  onDeleteAllBackups,
+}: {
+  backups: BackupFileInfo[];
+  onOpenBackup: (backup: BackupFileInfo) => void;
+  onDeleteBackup: (backup: BackupFileInfo) => void;
+  onDeleteAllBackups: () => void;
+}) {
+  return (
+    <section className="home-section backup-manager" aria-label="バックアップ管理">
+      <div className="section-heading-row">
+        <h2>バックアップ</h2>
+        <button type="button" onClick={onDeleteAllBackups} disabled={backups.length === 0}>
+          すべて削除
+        </button>
+      </div>
+      {backups.length === 0 ? <p className="muted">保存前バックアップはまだありません。</p> : null}
+      <div className="recovery-list">
+        {backups.map((backup) => (
+          <article
+            key={backup.id}
+            className={`recovery-candidate ${backup.valid_json ? "" : "recovery-invalid"}`}
+          >
+            <h3>{backup.title ?? backup.file_name}</h3>
+            <dl>
+              <div>
+                <dt>元プロジェクト</dt>
+                <dd>{backup.original_path}</dd>
+              </div>
+              <div>
+                <dt>バックアップ日時</dt>
+                <dd>{backup.created_at}</dd>
+              </div>
+              <div>
+                <dt>formatVersion</dt>
+                <dd>{backup.format_version ?? "不明"}</dd>
+              </div>
+              <div>
+                <dt>サイズ</dt>
+                <dd>{backup.byte_size.toLocaleString("ja-JP")} bytes</dd>
+              </div>
+              <div>
+                <dt>元ファイル</dt>
+                <dd>{backup.original_exists ? "存在します" : "見つかりません"}</dd>
+              </div>
+              <div>
+                <dt>検証</dt>
+                <dd>{backup.valid_json ? "JSONとして読み込み可能" : "破損または不正"}</dd>
+              </div>
+            </dl>
+            <div className="button-row">
+              <button
+                type="button"
+                disabled={!backup.valid_json}
+                onClick={() => onOpenBackup(backup)}
+              >
+                開く
+              </button>
+              <button
+                type="button"
+                disabled={!backup.valid_json}
+                onClick={() => onOpenBackup(backup)}
+              >
+                別名で復元
+              </button>
+              <button type="button" onClick={() => onDeleteBackup(backup)}>
+                削除
+              </button>
+            </div>
+          </article>
+        ))}
+      </div>
     </section>
   );
 }
@@ -1656,6 +2865,122 @@ function UnsavedChangesDialog({
   );
 }
 
+function EditLockConflictDialog({
+  path,
+  status,
+  currentSessionId,
+  onChoose,
+}: {
+  path: string;
+  status: ProjectEditLockStatus;
+  currentSessionId: string;
+  onChoose: (choice: EditLockChoice) => void;
+}) {
+  const lock = status.lock;
+  const sameSession = lock?.session_id === currentSessionId;
+  return (
+    <section className="modal" role="dialog" aria-modal="true" aria-label="編集競合">
+      <div className="modal-panel">
+        <h2>同じプロジェクトが編集中の可能性があります</h2>
+        <p>{lockStatusMessage(status)}</p>
+        <dl className="preview-summary">
+          <div>
+            <dt>対象ファイル</dt>
+            <dd>{path.replaceAll("\\", "/").split("/").at(-1) ?? path}</dd>
+          </div>
+          <div>
+            <dt>パス</dt>
+            <dd>{path}</dd>
+          </div>
+          <div>
+            <dt>ロック作成</dt>
+            <dd>{lock?.created_at ?? "不明"}</dd>
+          </div>
+          <div>
+            <dt>最終heartbeat</dt>
+            <dd>{lock?.updated_at ?? "不明"}</dd>
+          </div>
+          <div>
+            <dt>PID確認</dt>
+            <dd>{status.pid_status}</dd>
+          </div>
+          <div>
+            <dt>同一セッション</dt>
+            <dd>{sameSession ? "はい" : "いいえ"}</dd>
+          </div>
+          <div>
+            <dt>判定</dt>
+            <dd>{status.lock_state}</dd>
+          </div>
+        </dl>
+        <div className="warning-list">
+          <p className="warning warning-info">読み取り専用: 元ファイルを変更せず確認します。</p>
+          <p className="warning warning-info">
+            編集可能なコピー: 未保存文書として開き、保存時に名前を付けて保存します。
+          </p>
+          <p className="warning warning-warning">
+            競合を承知して編集: 外部更新検出と保存前バックアップは維持します。
+          </p>
+        </div>
+        <div className="modal-actions">
+          <button type="button" onClick={() => onChoose("read-only")}>
+            読み取り専用で開く
+          </button>
+          <button type="button" onClick={() => onChoose("copy")}>
+            編集可能なコピーとして開く
+          </button>
+          <button
+            type="button"
+            className="danger"
+            onClick={() => {
+              if (confirm("競合によって変更が失われる可能性があります。続行しますか？")) {
+                onChoose("force-edit");
+              }
+            }}
+          >
+            競合を承知して編集する
+          </button>
+          <button type="button" onClick={() => onChoose("cancel")}>
+            キャンセル
+          </button>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function ExternalConflictDialog({
+  request,
+  onChoose,
+}: {
+  request: ExternalConflictRequest;
+  onChoose: (choice: ExternalConflictChoice) => void;
+}) {
+  return (
+    <section className="modal" role="dialog" aria-modal="true" aria-label="外部更新の確認">
+      <div className="modal-panel narrow-modal">
+        <h2>保存先が外部で変更されています</h2>
+        <p>{request.path}</p>
+        <p>無警告では上書きしません。現在の編集内容をどう扱うか選んでください。</p>
+        <div className="modal-actions">
+          <button type="button" onClick={() => onChoose("reload")}>
+            外部版を読み直す
+          </button>
+          <button type="button" onClick={() => onChoose("save-as")}>
+            現在の内容を別名保存
+          </button>
+          <button type="button" className="danger-button" onClick={() => onChoose("overwrite")}>
+            競合を承知して上書き
+          </button>
+          <button type="button" onClick={() => onChoose("cancel")}>
+            キャンセル
+          </button>
+        </div>
+      </div>
+    </section>
+  );
+}
+
 function ErrorDialog({ error, onClose }: { error: UserFacingError; onClose: () => void }) {
   return (
     <section className="modal" role="dialog" aria-modal="true" aria-label="エラー">
@@ -1712,11 +3037,15 @@ function FirstRunGuide({ onClose }: { onClose: () => void }) {
 function AboutDialog({
   projectPath,
   recoveryDirectory,
+  appDataPaths,
+  backupCount,
   onShowGuide,
   onClose,
 }: {
   projectPath: string | null;
   recoveryDirectory: string | null;
+  appDataPaths: AppDataPaths | null;
+  backupCount: number;
   onShowGuide: () => void;
   onClose: () => void;
 }) {
@@ -1740,6 +3069,18 @@ function AboutDialog({
           <div>
             <dt>リカバリ保存場所</dt>
             <dd>{recoveryDirectory ?? "取得できませんでした"}</dd>
+          </div>
+          <div>
+            <dt>app data</dt>
+            <dd>{appDataPaths?.app_data_dir ?? "取得できませんでした"}</dd>
+          </div>
+          <div>
+            <dt>バックアップ保存場所</dt>
+            <dd>{appDataPaths?.backups_dir ?? "取得できませんでした"}</dd>
+          </div>
+          <div>
+            <dt>バックアップ件数</dt>
+            <dd>{backupCount}</dd>
           </div>
         </dl>
         <p>Personal Document Editorは完全ローカルで動作し、AI APIやクラウド変換を使用しません。</p>

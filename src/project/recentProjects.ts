@@ -1,5 +1,11 @@
 import { z } from "zod";
 
+import {
+  createStorageEnvelope,
+  readStorageEnvelope,
+  StorageEnvelopeSchema,
+} from "../preferences/localStorageEnvelope";
+
 export const RECENT_PROJECTS_STORAGE_KEY = "neword.recentProjects.v1";
 export const MAX_RECENT_PROJECTS = 10;
 
@@ -13,6 +19,8 @@ export const RecentProjectsSchema = z.object({
   formatVersion: z.literal(1),
   entries: z.array(RecentProjectEntrySchema).max(MAX_RECENT_PROJECTS),
 });
+
+export const RecentProjectsStorageEnvelopeSchema = StorageEnvelopeSchema(RecentProjectsSchema);
 
 export type RecentProjectEntry = z.infer<typeof RecentProjectEntrySchema>;
 export type RecentProjects = z.infer<typeof RecentProjectsSchema>;
@@ -116,7 +124,10 @@ export function loadRecentProjects(
   try {
     const raw = storage.load(RECENT_PROJECTS_STORAGE_KEY);
     if (!raw) return getDefaultRecentProjects();
-    return sanitizeRecentProjects(JSON.parse(raw) as unknown);
+    const parsed = JSON.parse(raw) as unknown;
+    const enveloped = readStorageEnvelope(parsed, RecentProjectsSchema);
+    if (enveloped === null) return getDefaultRecentProjects();
+    return sanitizeRecentProjects(enveloped.enveloped ? enveloped.data : enveloped.data);
   } catch {
     return getDefaultRecentProjects();
   }
@@ -129,7 +140,7 @@ export function saveRecentProjects(
   const parsed = RecentProjectsSchema.safeParse(normalizeRecentProjects(recent));
   if (!parsed.success) return false;
   try {
-    storage.save(RECENT_PROJECTS_STORAGE_KEY, JSON.stringify(parsed.data));
+    storage.save(RECENT_PROJECTS_STORAGE_KEY, JSON.stringify(createStorageEnvelope(parsed.data)));
     return true;
   } catch {
     return false;

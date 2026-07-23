@@ -1,4 +1,9 @@
 import {
+  createStorageEnvelope,
+  readStorageEnvelope,
+  StorageEnvelopeSchema,
+} from "./localStorageEnvelope";
+import {
   getDefaultUserPreferences,
   migrateLegacyEditingPreferences,
   migrateUserPreferences,
@@ -60,7 +65,11 @@ export function loadUserPreferences(
     if (!parsedJson.success) {
       return { preferences: getDefaultUserPreferences(), source: "default", warnings };
     }
-    const migrated = migrateUserPreferences(parsedJson.value);
+    const enveloped = readStorageEnvelope(parsedJson.value, UserPreferencesSchema);
+    if (enveloped === null) {
+      return { preferences: getDefaultUserPreferences(), source: "default", warnings };
+    }
+    const migrated = migrateUserPreferences(enveloped.enveloped ? enveloped.data : enveloped.data);
     warnings.push(...migrated.warnings);
     return {
       preferences: migrated.preferences,
@@ -121,21 +130,32 @@ export function saveUserPreferences(
     };
   }
   try {
-    storage.save(USER_PREFERENCES_STORAGE_KEY, JSON.stringify(parsed.data));
+    storage.save(
+      USER_PREFERENCES_STORAGE_KEY,
+      JSON.stringify(createStorageEnvelope(parsed.data, now)),
+    );
     return { ok: true, preferences: parsed.data, warnings: [] };
-  } catch {
+  } catch (error) {
+    const quotaExceeded =
+      error instanceof DOMException
+        ? error.name === "QuotaExceededError" || error.name === "NS_ERROR_DOM_QUOTA_REACHED"
+        : error instanceof Error && /quota/i.test(error.name);
     return {
       ok: false,
       preferences: parsed.data,
       warnings: [
         {
-          code: "PREFERENCES_SAVE_FAILED",
-          message: "個人設定の保存に失敗しました。",
+          code: quotaExceeded ? "PREFERENCES_QUOTA_EXCEEDED" : "PREFERENCES_SAVE_FAILED",
+          message: quotaExceeded
+            ? "個人設定ストレージの容量上限に達しました。"
+            : "個人設定の保存に失敗しました。",
         },
       ],
     };
   }
 }
+
+export const UserPreferencesStorageEnvelopeSchema = StorageEnvelopeSchema(UserPreferencesSchema);
 
 function loadRaw(
   storage: PreferencesStorage,

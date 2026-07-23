@@ -10,6 +10,7 @@ import type {
   PageSettings,
   ParagraphSettings,
 } from "../document-model/schema";
+import type { AppDataPaths } from "../project/fileAccess";
 import { createEditorExtensions } from "../features/editor/editorConfig";
 import {
   DEFAULT_TOOLBAR_COMMAND_ORDER,
@@ -47,6 +48,10 @@ type SettingsPanelProps = {
   footer: FooterContent;
   userPreferences: UserPreferences;
   preferenceSaveError: string | null;
+  appDataPaths?: AppDataPaths | null;
+  recoveryCount?: number;
+  backupCount?: number;
+  recentProjectCount?: number;
   className?: string;
   showAdvancedEditingSettings: boolean;
   canApplyToSelectedBlock: boolean;
@@ -70,6 +75,18 @@ type SettingsPanelProps = {
   onDeleteSelectedImage: () => void;
   onUpdateHeader: (header: HeaderContent) => void;
   onUpdateFooter: (footer: FooterContent) => void;
+  onClearRecentProjects?: () => void;
+  onResetPreferenceCategory?: (category: "appearance" | "layout" | "toolbar" | "editing") => void;
+  onResetAllPreferences?: () => void;
+  onResetOnboarding?: () => void;
+  onDeleteAllRecovery?: () => void;
+  onDeleteInvalidRecovery?: () => void;
+  onCleanupTemporaryFiles?: () => void;
+  onCleanupStaleLocks?: () => void;
+  onOpenRecoveryManager?: () => void;
+  onOpenBackupManager?: () => void;
+  onDeleteAllBackups?: () => void;
+  onOpenAppDataFolder?: (folder: "app_data" | "recovery" | "backups") => void;
 };
 
 export function SettingsPanel({
@@ -81,6 +98,10 @@ export function SettingsPanel({
   footer,
   userPreferences,
   preferenceSaveError,
+  appDataPaths = null,
+  recoveryCount = 0,
+  backupCount = 0,
+  recentProjectCount = 0,
   className,
   showAdvancedEditingSettings,
   canApplyToSelectedBlock,
@@ -100,6 +121,18 @@ export function SettingsPanel({
   onDeleteSelectedImage,
   onUpdateHeader,
   onUpdateFooter,
+  onClearRecentProjects = () => undefined,
+  onResetPreferenceCategory = () => undefined,
+  onResetAllPreferences = () => undefined,
+  onResetOnboarding = () => undefined,
+  onDeleteAllRecovery = () => undefined,
+  onDeleteInvalidRecovery = () => undefined,
+  onCleanupTemporaryFiles = () => undefined,
+  onCleanupStaleLocks = () => undefined,
+  onOpenRecoveryManager = () => undefined,
+  onOpenBackupManager = () => undefined,
+  onDeleteAllBackups = () => undefined,
+  onOpenAppDataFolder = () => undefined,
 }: SettingsPanelProps) {
   const headerRef = useRef(header);
   const footerRef = useRef(footer);
@@ -254,6 +287,87 @@ export function SettingsPanel({
         onChange={onUpdatePreferences}
         saveError={preferenceSaveError}
       />
+      <section className="preference-section" aria-label="データ管理">
+        <h3>データ管理</h3>
+        <dl className="settings-data-list">
+          <div>
+            <dt>app data</dt>
+            <dd>{appDataPaths?.app_data_dir ?? "取得中"}</dd>
+          </div>
+          <div>
+            <dt>リカバリ</dt>
+            <dd>
+              {appDataPaths?.recovery_dir ?? "取得中"} / {recoveryCount}件
+            </dd>
+          </div>
+          <div>
+            <dt>バックアップ</dt>
+            <dd>
+              {appDataPaths?.backups_dir ?? "取得中"} / {backupCount}件
+            </dd>
+          </div>
+          <div>
+            <dt>最近使ったファイル</dt>
+            <dd>{recentProjectCount}件</dd>
+          </div>
+        </dl>
+        <div className="button-row">
+          <button type="button" onClick={onOpenRecoveryManager}>
+            リカバリ管理
+          </button>
+          <button type="button" onClick={onOpenBackupManager}>
+            バックアップ管理
+          </button>
+          <button type="button" onClick={() => onOpenAppDataFolder("app_data")}>
+            app dataを開く
+          </button>
+          <button type="button" onClick={() => onOpenAppDataFolder("recovery")}>
+            リカバリを開く
+          </button>
+          <button type="button" onClick={() => onOpenAppDataFolder("backups")}>
+            バックアップを開く
+          </button>
+          <button type="button" onClick={onClearRecentProjects}>
+            履歴を消去
+          </button>
+          <button type="button" onClick={() => onResetPreferenceCategory("appearance")}>
+            外観設定を初期化
+          </button>
+          <button type="button" onClick={() => onResetPreferenceCategory("editing")}>
+            編集設定を初期化
+          </button>
+          <button type="button" onClick={() => onResetPreferenceCategory("layout")}>
+            レイアウト設定を初期化
+          </button>
+          <button type="button" onClick={() => onResetPreferenceCategory("toolbar")}>
+            ツールバー設定を初期化
+          </button>
+          <button type="button" onClick={onResetOnboarding}>
+            初回案内を初期化
+          </button>
+          <button type="button" onClick={onDeleteAllRecovery}>
+            正常リカバリを削除
+          </button>
+          <button type="button" onClick={onDeleteInvalidRecovery}>
+            壊れたリカバリだけ削除
+          </button>
+          <button type="button" onClick={onCleanupTemporaryFiles}>
+            一時ファイルを整理
+          </button>
+          <button type="button" onClick={onCleanupStaleLocks}>
+            staleロックを整理
+          </button>
+          <button type="button" className="danger-button" onClick={onResetAllPreferences}>
+            すべての設定を初期化
+          </button>
+          <button type="button" className="danger-button" onClick={onDeleteAllBackups}>
+            バックアップを全削除
+          </button>
+        </div>
+        <p className="muted">
+          アプリ管理データの削除対象に、ユーザーが任意の場所へ保存したプロジェクトは含めません。
+        </p>
+      </section>
       <section className="preference-section" aria-label="ツールバー設定">
         <h3>ツールバー</h3>
         <label>

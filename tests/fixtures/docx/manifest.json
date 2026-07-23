@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "generatedFixtures": [
+    {
+      "name": "stage14-unsupported-elements",
+      "builder": "../../fixture-builders/docxPackages.ts",
+      "covers": [
+        "comments",
+        "footnotes",
+        "endnotes",
+        "math",
+        "charts",
+        "SmartArt/diagram",
+        "OLE/embedded objects",
+        "tracked changes",
+        "external images",
+        "external templates"
+      ],
+      "privacy": "synthetic content only"
+    }
+  ],
+  "binaryFixturesKeptSmall": true
+}

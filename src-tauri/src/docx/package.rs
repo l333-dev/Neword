@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;
@@ -47,6 +48,7 @@ pub struct DocxInspection {
     sections: Vec<DocxSection>,
     paragraphs: Vec<DocxParagraphFormatting>,
     table_warnings: Vec<DocxTableWarning>,
+    unsupported_features: Vec<DocxUnsupportedFeature>,
     entries: Vec<DocxEntryInfo>,
     warnings: Vec<String>,
 }
@@ -167,6 +169,17 @@ pub struct DocxTableWarning {
     simplified: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct DocxUnsupportedFeature {
+    code: String,
+    category: String,
+    severity: String,
+    count: usize,
+    affected_part: String,
+    can_continue: bool,
+    recommendation: String,
+}
+
 impl DocxParagraphFormatting {
     fn new(index: usize) -> Self {
         Self {
@@ -212,6 +225,102 @@ fn validate_zip_path(name: &str) -> Result<(), String> {
         return Err("unsafe ZIP entry path".to_string());
     }
     Ok(())
+}
+
+fn push_unsupported_feature(
+    features: &mut Vec<DocxUnsupportedFeature>,
+    code: &str,
+    category: &str,
+    severity: &str,
+    affected_part: &str,
+    count: usize,
+    recommendation: &str,
+) {
+    if count == 0 {
+        return;
+    }
+    if let Some(existing) = features.iter_mut().find(|feature| {
+        feature.code == code
+            && feature.category == category
+            && feature.severity == severity
+            && feature.affected_part == affected_part
+    }) {
+        existing.count = existing.count.saturating_add(count);
+        return;
+    }
+    features.push(DocxUnsupportedFeature {
+        code: code.to_string(),
+        category: category.to_string(),
+        severity: severity.to_string(),
+        count,
+        affected_part: affected_part.to_string(),
+        can_continue: severity != "error",
+        recommendation: recommendation.to_string(),
+    });
+}
+
+fn unsupported_feature_from_entry(name: &str, features: &mut Vec<DocxUnsupportedFeature>) {
+    if name == "word/comments.xml" {
+        push_unsupported_feature(
+            features,
+            "docx.unsupported_comments",
+            "unsupported-element",
+            "warning",
+            name,
+            1,
+            "コメントは元DOCXに残りますが、再書き出しでは保持されません。",
+        );
+    } else if name == "word/footnotes.xml" {
+        push_unsupported_feature(
+            features,
+            "docx.unsupported_footnotes",
+            "unsupported-element",
+            "warning",
+            name,
+            1,
+            "脚注は未対応です。必要な内容は元DOCXで確認してください。",
+        );
+    } else if name == "word/endnotes.xml" {
+        push_unsupported_feature(
+            features,
+            "docx.unsupported_endnotes",
+            "unsupported-element",
+            "warning",
+            name,
+            1,
+            "文末脚注は未対応です。必要な内容は元DOCXで確認してください。",
+        );
+    } else if name.starts_with("word/charts/") {
+        push_unsupported_feature(
+            features,
+            "docx.unsupported_chart",
+            "unsupported-element",
+            "warning",
+            name,
+            1,
+            "グラフは画像化または未対応要素として扱われる可能性があります。",
+        );
+    } else if name.starts_with("word/diagrams/") || name.starts_with("word/diagrams") {
+        push_unsupported_feature(
+            features,
+            "docx.unsupported_smart_art",
+            "unsupported-element",
+            "warning",
+            name,
+            1,
+            "SmartArt/diagramは編集可能な構造として保持されません。",
+        );
+    } else if name.starts_with("word/embeddings/") || name.contains("oleObject") {
+        push_unsupported_feature(
+            features,
+            "docx.unsupported_embedded_object",
+            "unsupported-element",
+            "warning",
+            name,
+            1,
+            "埋め込みオブジェクトやOLEは実行せず、再書き出しでは保持しません。",
+        );
+    }
 }
 
 fn image_mime_from_path(path: &str) -> Option<&'static str> {
@@ -408,6 +517,236 @@ fn parse_relationship_targets(xml: &[u8]) -> Result<Vec<(String, RelationshipTar
     }
 
     Ok(relationships)
+}
+
+fn inspect_relationship_unsupported_features(
+    xml: &[u8],
+    rels_part: &str,
+) -> Result<Vec<DocxUnsupportedFeature>, String> {
+    let relationships = parse_relationship_targets(xml)?;
+    let mut features = Vec::new();
+    for (_, relationship) in relationships {
+        let relationship_type = relationship.relationship_type.to_ascii_lowercase();
+        if relationship.external && relationship_type.contains("/image") {
+            push_unsupported_feature(
+                &mut features,
+                "relationship.external_image",
+                "external-image-blocked",
+                "warning",
+                rels_part,
+                1,
+                "外部画像は自動取得しません。必要に応じて元DOCXを確認してください。",
+            );
+        } else if relationship.external && relationship_type.contains("/hyperlink") {
+            push_unsupported_feature(
+                &mut features,
+                "relationship.external_hyperlink",
+                "general",
+                "info",
+                rels_part,
+                1,
+                "外部ハイパーリンクはリンク先を取得せず、参照として扱います。",
+            );
+        } else if relationship.external && relationship_type.contains("attachedtemplate") {
+            push_unsupported_feature(
+                &mut features,
+                "relationship.external_template",
+                "unsupported-element",
+                "warning",
+                rels_part,
+                1,
+                "外部テンプレートは取得せず、文書には適用しません。",
+            );
+        } else if relationship.external {
+            push_unsupported_feature(
+                &mut features,
+                "relationship.external_reference",
+                "unsupported-element",
+                "warning",
+                rels_part,
+                1,
+                "外部relationshipは自動取得しません。",
+            );
+        }
+
+        if relationship_type.contains("/chart") {
+            push_unsupported_feature(
+                &mut features,
+                "docx.unsupported_chart",
+                "unsupported-element",
+                "warning",
+                rels_part,
+                1,
+                "グラフは編集可能な構造として保持されません。",
+            );
+        } else if relationship_type.contains("/diagram") {
+            push_unsupported_feature(
+                &mut features,
+                "docx.unsupported_smart_art",
+                "unsupported-element",
+                "warning",
+                rels_part,
+                1,
+                "SmartArt/diagramは編集可能な構造として保持されません。",
+            );
+        } else if relationship_type.contains("/oleobject")
+            || relationship_type.contains("/package")
+            || relationship_type.contains("/embeddings")
+        {
+            push_unsupported_feature(
+                &mut features,
+                "docx.unsupported_embedded_object",
+                "unsupported-element",
+                "warning",
+                rels_part,
+                1,
+                "埋め込みオブジェクトやOLEは実行せず、再書き出しでは保持しません。",
+            );
+        }
+    }
+    Ok(features)
+}
+
+fn inspect_unsupported_document_features(
+    xml: &[u8],
+) -> Result<Vec<DocxUnsupportedFeature>, String> {
+    let mut reader = Reader::from_reader(xml);
+    reader.config_mut().trim_text(true);
+    let mut buffer = Vec::new();
+    let mut counts: BTreeMap<&'static str, usize> = BTreeMap::new();
+
+    loop {
+        match reader.read_event_into(&mut buffer) {
+            Ok(Event::Start(event)) | Ok(Event::Empty(event)) => {
+                let raw_name = event.name();
+                let name = local_name(raw_name.as_ref());
+                let key = match name {
+                    b"commentRangeStart" | b"commentRangeEnd" | b"commentReference" => {
+                        Some("comments")
+                    }
+                    b"footnoteReference" => Some("footnotes"),
+                    b"endnoteReference" => Some("endnotes"),
+                    b"oMath" | b"oMathPara" => Some("math"),
+                    b"chart" => Some("chart"),
+                    b"relIds" | b"dataModel" => Some("smart_art"),
+                    b"object" | b"oleObject" => Some("embedded_object"),
+                    b"pict" => Some("vml"),
+                    b"txbxContent" => Some("text_box"),
+                    b"ins" | b"del" | b"moveFrom" | b"moveTo" | b"pPrChange" | b"rPrChange"
+                    | b"tblPrChange" | b"trPrChange" | b"tcPrChange" => Some("tracked_changes"),
+                    _ => None,
+                };
+                if let Some(key) = key {
+                    counts
+                        .entry(key)
+                        .and_modify(|count| *count += 1)
+                        .or_insert(1);
+                }
+            }
+            Ok(Event::Eof) => break,
+            Ok(_) => {}
+            Err(error) => return Err(error.to_string()),
+        }
+        buffer.clear();
+    }
+
+    let mut features = Vec::new();
+    for (key, count) in counts {
+        match key {
+            "comments" => push_unsupported_feature(
+                &mut features,
+                "docx.unsupported_comments",
+                "unsupported-element",
+                "warning",
+                "word/document.xml",
+                count,
+                "コメントは取り込まず、再書き出しでも保持しません。",
+            ),
+            "footnotes" => push_unsupported_feature(
+                &mut features,
+                "docx.unsupported_footnotes",
+                "unsupported-element",
+                "warning",
+                "word/document.xml",
+                count,
+                "脚注本文は取り込みません。元DOCXで確認してください。",
+            ),
+            "endnotes" => push_unsupported_feature(
+                &mut features,
+                "docx.unsupported_endnotes",
+                "unsupported-element",
+                "warning",
+                "word/document.xml",
+                count,
+                "文末脚注本文は取り込みません。元DOCXで確認してください。",
+            ),
+            "math" => push_unsupported_feature(
+                &mut features,
+                "docx.unsupported_math",
+                "unsupported-element",
+                "warning",
+                "word/document.xml",
+                count,
+                "数式は編集可能な数式として保持されません。",
+            ),
+            "chart" => push_unsupported_feature(
+                &mut features,
+                "docx.unsupported_chart",
+                "unsupported-element",
+                "warning",
+                "word/document.xml",
+                count,
+                "グラフは編集可能な構造として保持されません。",
+            ),
+            "smart_art" => push_unsupported_feature(
+                &mut features,
+                "docx.unsupported_smart_art",
+                "unsupported-element",
+                "warning",
+                "word/document.xml",
+                count,
+                "SmartArt/diagramは編集可能な構造として保持されません。",
+            ),
+            "embedded_object" => push_unsupported_feature(
+                &mut features,
+                "docx.unsupported_embedded_object",
+                "unsupported-element",
+                "warning",
+                "word/document.xml",
+                count,
+                "埋め込みオブジェクトやOLEは実行せず、再書き出しでは保持しません。",
+            ),
+            "vml" => push_unsupported_feature(
+                &mut features,
+                "docx.unsupported_vml",
+                "unsupported-element",
+                "warning",
+                "word/document.xml",
+                count,
+                "VML描画は近似または省略される可能性があります。",
+            ),
+            "text_box" => push_unsupported_feature(
+                &mut features,
+                "docx.unsupported_text_box",
+                "unsupported-element",
+                "warning",
+                "word/document.xml",
+                count,
+                "テキストボックスは通常本文へ近似される可能性があります。",
+            ),
+            "tracked_changes" => push_unsupported_feature(
+                &mut features,
+                "docx.tracked_changes_detected",
+                "import-recovery",
+                "warning",
+                "word/document.xml",
+                count,
+                "変更履歴は確定済み表示に近い形で取り込みます。元DOCXで確認してください。",
+            ),
+            _ => {}
+        }
+    }
+    Ok(features)
 }
 
 fn local_name(name: &[u8]) -> &[u8] {
@@ -1431,6 +1770,14 @@ fn push_header_footer_item(
 }
 
 pub fn inspect_docx<P: AsRef<Path>>(path: P) -> Result<DocxInspection, String> {
+    inspect_docx_with_cancel(path, || false)
+}
+
+pub fn inspect_docx_with_cancel<P, F>(path: P, is_cancelled: F) -> Result<DocxInspection, String>
+where
+    P: AsRef<Path>,
+    F: Fn() -> bool,
+{
     let file = File::open(path).map_err(|error| error.to_string())?;
     let mut archive = ZipArchive::new(file).map_err(|error| error.to_string())?;
     let mut total_uncompressed = 0_u64;
@@ -1450,12 +1797,16 @@ pub fn inspect_docx<P: AsRef<Path>>(path: P) -> Result<DocxInspection, String> {
         sections: Vec::new(),
         paragraphs: Vec::new(),
         table_warnings: Vec::new(),
+        unsupported_features: Vec::new(),
         entries: Vec::new(),
         warnings: Vec::new(),
     };
     let mut rels_parts = Vec::new();
 
     for index in 0..archive.len() {
+        if is_cancelled() {
+            return Err("DOCX import cancelled".to_string());
+        }
         let mut entry = archive.by_index(index).map_err(|error| error.to_string())?;
         let name = entry.name().to_string();
         validate_zip_path(&name)?;
@@ -1488,10 +1839,20 @@ pub fn inspect_docx<P: AsRef<Path>>(path: P) -> Result<DocxInspection, String> {
         }
         if name == "word/vbaProject.bin" || name.ends_with(".bin") && name.contains("vba") {
             inspection.has_macros = true;
+            push_unsupported_feature(
+                &mut inspection.unsupported_features,
+                "docx.macros_detected",
+                "unsupported-element",
+                "warning",
+                &name,
+                1,
+                "マクロは実行せず、再書き出しでも保持しません。",
+            );
             inspection
                 .warnings
                 .push("macro-enabled content detected".to_string());
         }
+        unsupported_feature_from_entry(&name, &mut inspection.unsupported_features);
         if name.starts_with("word/media/") {
             inspection.media_entries.push(name.clone());
         }
@@ -1529,20 +1890,43 @@ pub fn inspect_docx<P: AsRef<Path>>(path: P) -> Result<DocxInspection, String> {
     if !inspection.has_document_xml {
         return Err("DOCX is missing word/document.xml".to_string());
     }
+    if is_cancelled() {
+        return Err("DOCX import cancelled".to_string());
+    }
     let document_xml = read_entry_bytes(
         &mut archive,
         "word/document.xml",
         MAX_ENTRY_UNCOMPRESSED_SIZE,
     )?;
+    if is_cancelled() {
+        return Err("DOCX import cancelled".to_string());
+    }
     let (sections, paragraphs) = inspect_document_xml(&document_xml)?;
     inspection.sections = sections;
     inspection.paragraphs = paragraphs;
+    inspection
+        .unsupported_features
+        .extend(inspect_unsupported_document_features(&document_xml)?);
     inspection.image_warnings = inspect_image_warnings(&document_xml)?;
     inspection.table_warnings = inspect_table_warnings(&document_xml)?;
+    if is_cancelled() {
+        return Err("DOCX import cancelled".to_string());
+    }
     let (headers, footers) = extract_header_footers(&mut archive, &document_xml)?;
     inspection.headers = headers;
     inspection.footers = footers;
+    if is_cancelled() {
+        return Err("DOCX import cancelled".to_string());
+    }
     inspection.image_relationships = extract_docx_images(&mut archive, &rels_parts)?;
+    for rels_part in &rels_parts {
+        let rels_xml = read_entry_bytes(&mut archive, rels_part, MAX_ENTRY_UNCOMPRESSED_SIZE)?;
+        inspection
+            .unsupported_features
+            .extend(inspect_relationship_unsupported_features(
+                &rels_xml, rels_part,
+            )?);
+    }
 
     Ok(inspection)
 }
@@ -1709,6 +2093,16 @@ mod tests {
     }
 
     #[test]
+    fn cancellable_inspection_reports_cancelled_separately() -> Result<(), Box<dyn Error>> {
+        let path = write_zip_fixture("cancelled", &[("word/document.xml", b"<document/>")])?;
+        let result = super::inspect_docx_with_cancel(&path, || true);
+        fs::remove_file(path)?;
+
+        assert!(matches!(result, Err(message) if message == "DOCX import cancelled"));
+        Ok(())
+    }
+
+    #[test]
     fn detects_unsupported_table_structures() -> Result<(), Box<dyn Error>> {
         let xml =
             br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
@@ -1767,6 +2161,55 @@ mod tests {
         assert!(codes.contains(&"image.anchored_unsupported"));
         assert!(codes.contains(&"image.text_wrapping_unsupported"));
         assert!(codes.contains(&"image.crop_unsupported"));
+        Ok(())
+    }
+
+    #[test]
+    fn detects_unsupported_docx_elements_without_storing_content() -> Result<(), Box<dyn Error>> {
+        let xml = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math" xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart">
+          <w:body>
+            <w:p><w:commentRangeStart w:id="1"/><w:r><w:t>secret comment target</w:t></w:r><w:commentReference w:id="1"/></w:p>
+            <w:p><w:r><w:footnoteReference w:id="2"/><w:endnoteReference w:id="3"/></w:r></w:p>
+            <w:p><m:oMath><m:r><m:t>x+y</m:t></m:r></m:oMath></w:p>
+            <w:p><w:ins><w:r><w:t>inserted</w:t></w:r></w:ins><w:del><w:r><w:t>deleted</w:t></w:r></w:del></w:p>
+            <w:p><c:chart/></w:p>
+          </w:body>
+        </w:document>"#;
+        let rels = br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+          <Relationship Id="rIdImage" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="https://example.invalid/image.png" TargetMode="External"/>
+          <Relationship Id="rIdTemplate" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/attachedTemplate" Target="https://example.invalid/template.dotx" TargetMode="External"/>
+          <Relationship Id="rIdOle" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/oleObject" Target="embeddings/oleObject1.bin"/>
+        </Relationships>"#;
+        let path = write_zip_fixture(
+            "unsupported-elements",
+            &[
+                ("word/document.xml", xml),
+                ("word/comments.xml", b"<w:comments/>"),
+                ("word/footnotes.xml", b"<w:footnotes/>"),
+                ("word/endnotes.xml", b"<w:endnotes/>"),
+                ("word/_rels/document.xml.rels", rels),
+                ("word/charts/chart1.xml", b"<c:chartSpace/>"),
+                ("word/embeddings/oleObject1.bin", b"not executed"),
+            ],
+        )?;
+        let inspection = inspect_docx(&path)?;
+        fs::remove_file(path)?;
+        let codes = inspection
+            .unsupported_features
+            .iter()
+            .map(|feature| feature.code.as_str())
+            .collect::<Vec<_>>();
+
+        assert!(codes.contains(&"docx.unsupported_comments"));
+        assert!(codes.contains(&"docx.unsupported_footnotes"));
+        assert!(codes.contains(&"docx.unsupported_endnotes"));
+        assert!(codes.contains(&"docx.unsupported_math"));
+        assert!(codes.contains(&"docx.tracked_changes_detected"));
+        assert!(codes.contains(&"docx.unsupported_chart"));
+        assert!(codes.contains(&"docx.unsupported_embedded_object"));
+        assert!(codes.contains(&"relationship.external_image"));
+        assert!(codes.contains(&"relationship.external_template"));
+        assert!(!format!("{:?}", inspection.unsupported_features).contains("secret comment target"));
         Ok(())
     }
 

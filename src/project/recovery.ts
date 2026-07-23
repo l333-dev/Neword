@@ -66,6 +66,10 @@ export function createProjectKey(projectPath: string | null, seed: string): stri
 }
 
 export function autosaveFileName(projectKey: string): string {
+  return `recovery-${projectKey.replace(/[^a-zA-Z0-9-]/g, "-")}.neword`;
+}
+
+export function legacyAutosaveFileName(projectKey: string): string {
   return `autosave-${projectKey.replace(/[^a-zA-Z0-9-]/g, "-")}.json`;
 }
 
@@ -212,7 +216,10 @@ export function recoveryFilesToPrune(
   const expired = files.filter((file) => shouldPruneRecovery(file, now));
   const byProject = new Map<string, RecoveryFileInfo[]>();
   for (const file of files) {
-    const key = file.name.replace(/^autosave-/, "").replace(/\.json$/, "");
+    const key = file.name
+      .replace(/^autosave-/, "")
+      .replace(/^recovery-/, "")
+      .replace(/\.(json|neword)$/, "");
     byProject.set(key, [...(byProject.get(key) ?? []), file]);
   }
   const overLimit = [...byProject.values()].flatMap((items) =>

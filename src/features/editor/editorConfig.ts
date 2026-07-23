@@ -13,6 +13,7 @@ import {
   type UserEditingPreferences,
 } from "../../stores/editingPreferences";
 import { PageBreak } from "./page-break";
+import { SearchHighlight } from "./search";
 
 const HexColorPattern = /^#[0-9A-Fa-f]{6}$/;
 const VerticalAlignValues = new Set(["top", "middle", "bottom"]);
@@ -331,6 +332,7 @@ export function createEditorExtensions(
     TableCellWithFormatting,
     AssetImage.configure({ allowBase64: true }),
     PageBreak,
+    SearchHighlight,
   ];
 }
 

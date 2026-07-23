@@ -1,5 +1,4 @@
 import DOMPurify from "dompurify";
-import mammoth from "mammoth/mammoth.browser";
 
 import { classifyBlock, type ClassificationInput } from "../../classification/rules";
 import {
@@ -131,6 +130,16 @@ type ConvertDocxOptions = {
   inspection?: DocxInspection;
 };
 
+export type MammothHtmlMessage = {
+  type: string;
+  message: string;
+};
+
+export type MammothHtmlResult = {
+  value: string;
+  messages: MammothHtmlMessage[];
+};
+
 function warning(
   code: string,
   message: string,
@@ -138,7 +147,92 @@ function warning(
   location?: string,
   details?: Partial<ImportWarning>,
 ): ImportWarning {
-  return { code, message, severity, location, ...details };
+  return {
+    code,
+    category: warningCategory(code),
+    message,
+    severity,
+    location,
+    humanReadableReason: message,
+    affectedPart: details?.part ?? location,
+    sourceReference: location,
+    canContinue: severity !== "error",
+    recommendation: warningRecommendation(code, severity),
+    ...details,
+  };
+}
+
+function warningCategory(code: string): NonNullable<ImportWarning["category"]> {
+  if (code.includes("macro")) return "macro-detected";
+  if (code.includes("external")) return "external-image-blocked";
+  if (code.includes("relationship") || code.includes("missing_part"))
+    return "malformed-relationship";
+  if (code.includes("size_limit") || code.includes("oversized")) return "oversized-asset";
+  if (code.startsWith("table.") || code.includes("table")) return "unsupported-table-feature";
+  if (code.startsWith("header.") || code.startsWith("footer.")) return "unsupported-header-footer";
+  if (code.startsWith("section.")) return "unsupported-section";
+  if (code.includes("formatting") || code.includes("spacing")) return "lost-formatting";
+  if (code.includes("numbering")) return "unsupported-numbering";
+  if (code.includes("unsupported")) return "unsupported-element";
+  return "general";
+}
+
+function warningRecommendation(code: string, severity: ImportWarning["severity"]): string {
+  if (severity === "error") return "読み込みを中止し、元DOCXを確認してください。";
+  if (code.includes("macro")) return "マクロは実行されません。必要なら元DOCXで確認してください。";
+  if (code.includes("external"))
+    return "外部画像は自動取得しません。必要ならローカル画像として挿入してください。";
+  if (code.includes("table")) return "表の見た目をプレビューで確認してください。";
+  if (code.startsWith("section.")) return "ページ設定やセクション区切りを確認してください。";
+  return "プレビューを確認してから読み込みを続行してください。";
+}
+
+function aggregateImportWarnings(warnings: ImportWarning[]): ImportWarning[] {
+  const aggregated = new Map<string, ImportWarning & { originalValue?: unknown }>();
+  for (const item of warnings) {
+    const key = [
+      item.category ?? warningCategory(item.code),
+      item.code,
+      item.affectedPart ?? item.part ?? item.location ?? "",
+      item.recommendation ??
+        item.humanReadableReason ??
+        item.message.replace(/（検出数: \d+）/g, ""),
+    ].join("\u001f");
+    const existing = aggregated.get(key);
+    const itemCount =
+      typeof item.originalValue === "object" &&
+      item.originalValue !== null &&
+      "count" in item.originalValue &&
+      typeof item.originalValue.count === "number"
+        ? item.originalValue.count
+        : 1;
+    if (!existing) {
+      aggregated.set(key, {
+        ...item,
+        originalValue: {
+          count: itemCount,
+          examples: item.sourceReference ? [item.sourceReference] : [],
+        },
+      });
+      continue;
+    }
+    const originalValue =
+      typeof existing.originalValue === "object" && existing.originalValue !== null
+        ? existing.originalValue
+        : {};
+    const previousCount =
+      "count" in originalValue && typeof originalValue.count === "number" ? originalValue.count : 1;
+    const examples =
+      "examples" in originalValue && Array.isArray(originalValue.examples)
+        ? originalValue.examples.filter((value): value is string => typeof value === "string")
+        : [];
+    if (item.sourceReference && !examples.includes(item.sourceReference) && examples.length < 5) {
+      examples.push(item.sourceReference);
+    }
+    existing.originalValue = { count: previousCount + itemCount, examples };
+    existing.message = `${item.message}（${previousCount + itemCount}件）`;
+  }
+  return [...aggregated.values()];
 }
 
 export function sanitizeImportHtml(html: string): string {
@@ -238,14 +332,31 @@ export async function convertDocxArrayBufferToImportResult({
   sourceInfo,
   inspection,
 }: ConvertDocxOptions): Promise<ImportResult> {
-  const result = await mammoth.convertToHtml({ arrayBuffer });
-  const htmlWarnings = warningsFromHtml(result.value);
+  const mammoth = await import("mammoth/mammoth.browser");
+  const result = await mammoth.default.convertToHtml({ arrayBuffer });
+  return buildImportResultFromMammothHtml({
+    mammothResult: result,
+    sourceInfo,
+    inspection,
+  });
+}
+
+export function buildImportResultFromMammothHtml({
+  mammothResult,
+  sourceInfo,
+  inspection,
+}: {
+  mammothResult: MammothHtmlResult;
+  sourceInfo: SourceFileInfo;
+  inspection?: DocxInspection;
+}): ImportResult {
+  const htmlWarnings = warningsFromHtml(mammothResult.value);
   const imageImport = imageAssetsFromInspection(inspection);
   const pageImport = pageSettingsFromInspection(inspection);
   const headerFooterImport = headerFooterFromInspection(inspection, sourceInfo.inspectedAt);
   const formattingImport = paragraphFormattingFromInspection(inspection);
   const sanitizedHtml = applyOoxmlFormattingToHtml(
-    attachImageAssetsToHtml(sanitizeImportHtml(result.value), imageImport.assets),
+    attachImageAssetsToHtml(sanitizeImportHtml(mammothResult.value), imageImport.assets),
     formattingImport.formatting,
     inspection?.paragraphs ?? [],
     inspection?.sections ?? [],
@@ -260,7 +371,7 @@ export async function convertDocxArrayBufferToImportResult({
     ...headerFooterImport.warnings,
     ...formattingImport.warnings,
     ...imageImport.warnings,
-    ...result.messages.map((message, index) =>
+    ...mammothResult.messages.map((message, index) =>
       warning(
         "mammoth.message",
         message.message,
@@ -284,7 +395,7 @@ export async function convertDocxArrayBufferToImportResult({
     paragraphSettings: firstParagraphSettings(formattingImport.formatting),
     header: headerFooterImport.header,
     footer: headerFooterImport.footer,
-    warnings,
+    warnings: aggregateImportWarnings(warnings),
     sourceInfo,
   };
 }
@@ -556,6 +667,25 @@ function warningsFromInspection(inspection: DocxInspection | undefined): ImportW
         "docx.missing_numbering",
         "numbering.xmlが見つからないため、リスト情報が不足する可能性があります。",
         "info",
+      ),
+    );
+  }
+
+  for (const feature of inspection.unsupported_features ?? []) {
+    warnings.push(
+      warning(
+        feature.code,
+        `${feature.recommendation}（検出数: ${feature.count}）`,
+        feature.severity,
+        feature.affected_part,
+        {
+          category: feature.category as ImportWarning["category"],
+          affectedPart: feature.affected_part,
+          part: feature.affected_part,
+          canContinue: feature.can_continue,
+          recommendation: feature.recommendation,
+          originalValue: { count: feature.count },
+        },
       ),
     );
   }
